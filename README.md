@@ -595,6 +595,9 @@ All data sources are free and require no paid subscriptions:
 | Turkish finance RSS | bloomberght, bigpara sentiment | No |
 
 ---
+## License
+
+GNU General Public License v3.0
 
 ## Disclaimer
 
