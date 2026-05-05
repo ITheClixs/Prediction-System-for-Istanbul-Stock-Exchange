@@ -1,84 +1,797 @@
-# BIST-100 Stock Market Prediction System
+# BIST-Predict: A Hybrid Quantitative Machine Learning System for Daily BIST-100 Directional Forecasting
 
-A CLI-based daily trading signal system for Borsa Istanbul (BIST-100) stocks. Predicts next-day price direction (UP/DOWN) with calibrated confidence scores and percentage price targets using an ensemble of gradient boosting and deep learning models, institutional-grade quantitative methods, free data sources, and a high-performance Rust feature engine.
+**Abstract.** This repository implements a CLI-operated research system for daily Borsa Istanbul equity forecasting. Given a stock universe \( \mathcal{U} \), daily OHLCV observations, macroeconomic state variables, calendar variables, and news-derived sentiment, the system constructs a multi-modal feature tensor and estimates next-session directional probability \(P(y_{i,t+1}=1 \mid \mathbf{x}_{i,t})\) together with a conditional percentage-return forecast \( \hat{r}_{i,t+1} \). The implementation combines free market-data ingestion, a Rust/PyO3 technical-indicator engine, Python quantitative alpha modules, tabular gradient-boosted learners, sequential neural models, stacking, probability calibration, SQLite-backed model governance, walk-forward evaluation, and live accuracy tracking. The practical objective is not a single black-box classifier; it is an auditable research pipeline in which each transformation from raw market state to signal tier is represented as a typed, testable module.
+
+**Keywords:** BIST-100, directional forecasting, XGBoost, LightGBM, LSTM, Transformer encoder, Platt calibration, Ornstein-Uhlenbeck process, GARCH(1,1), Hidden Markov Models, Kalman filtering, feature stores, walk-forward backtesting.
+
+---
 
 ## Table of Contents
 
-- [Features](#features)
-- [Architecture](#architecture)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [CLI Commands](#cli-commands)
-- [Pipeline Deep Dive](#pipeline-deep-dive)
-  - [1. Data Ingestion](#1-data-ingestion)
-  - [2. Feature Engine (Rust + Python)](#2-feature-engine-rust--python)
-  - [3. Quantitative Alpha Layer](#3-quantitative-alpha-layer)
-  - [4. Model Layer](#4-model-layer)
-  - [5. Evaluation & Backtesting](#5-evaluation--backtesting)
-- [Configuration](#configuration)
-- [Project Structure](#project-structure)
-- [Testing](#testing)
-- [Tech Stack](#tech-stack)
-- [Data Sources](#data-sources)
+- [1. Research Problem](#1-research-problem)
+- [2. System Architecture](#2-system-architecture)
+- [3. Data and Storage Model](#3-data-and-storage-model)
+- [4. Feature Construction](#4-feature-construction)
+- [5. Quantitative Alpha Derivations](#5-quantitative-alpha-derivations)
+- [6. Learning Algorithms](#6-learning-algorithms)
+- [7. Calibration, Signal Tiers, and Decision Rule](#7-calibration-signal-tiers-and-decision-rule)
+- [8. Evaluation Protocol](#8-evaluation-protocol)
+- [9. Installation](#9-installation)
+- [10. Quick Start](#10-quick-start)
+- [11. CLI Commands](#11-cli-commands)
+- [12. Configuration](#12-configuration)
+- [13. Project Structure](#13-project-structure)
+- [14. Testing](#14-testing)
+- [15. Tech Stack and Data Sources](#15-tech-stack-and-data-sources)
+- [16. Research Status and Limitations](#16-research-status-and-limitations)
+- [17. License](#17-license)
+- [18. Disclaimer](#18-disclaimer)
 
 ---
 
-## Features
+## 1. Research Problem
 
-- **Daily trading signals** for 30 BIST-100 stocks with direction, confidence, and price targets
-- **Four ML models** (XGBoost, LightGBM, LSTM, Transformer) with meta-learner ensemble
-- **Calibrated confidence** via Platt scaling -- when the system says "78% UP", historically ~78% of such predictions are correct
-- **Quantitative alpha** layer: Kalman filter, Ornstein-Uhlenbeck mean reversion, GARCH volatility, HMM regime detection, Hurst exponent, wavelet decomposition
-- **Regime-aware routing** dynamically adjusts model weights based on bull/bear/sideways market state
-- **High-performance Rust feature engine** computes 30+ technical indicators via PyO3
-- **Walk-forward backtesting** with realistic transaction costs (commission + slippage) and no future leakage
-- **Live accuracy tracking** with rolling windows and confidence bucket analysis
-- **Free data only** -- no paid subscriptions required (Is Yatirim, Yahoo Finance, TCMB, Google News RSS)
-- **173 tests** covering every module
+For stock \(i \in \mathcal{U}\) and trading date \(t\), let the observed state be
+
+$$
+\mathbf{s}_{i,t} =
+\left[
+O_{i,t}, H_{i,t}, L_{i,t}, C_{i,t}, V_{i,t},
+\mathbf{m}_t, \mathbf{q}_{i,t}, \mathbf{c}_t
+\right],
+$$
+
+where \(O,H,L,C,V\) are open, high, low, close, and volume; \(\mathbf{m}_t\) denotes macro variables from TCMB; \(\mathbf{q}_{i,t}\) denotes ticker-level sentiment; and \(\mathbf{c}_t\) denotes calendar state.
+
+The supervised labels are next-observation direction and return:
+
+$$
+r_{i,t+1} = \frac{C_{i,t+1} - C_{i,t}}{C_{i,t}}, \qquad
+y_{i,t+1} = \mathbb{1}\{r_{i,t+1} > 0\}.
+$$
+
+The repository estimates a dual-head predictive mapping:
+
+$$
+f_\theta(\mathbf{x}_{i,t}) =
+\left(
+\hat{p}_{i,t+1},
+\hat{r}_{i,t+1}
+\right),
+\qquad
+\hat{p}_{i,t+1} \approx P(y_{i,t+1}=1 \mid \mathbf{x}_{i,t}).
+$$
+
+The feature vector \(\mathbf{x}_{i,t}\) is a deterministic transformation of historical prices, macro data, sentiment, and temporal encodings. The project is therefore a complete applied ML research stack: data generation, feature computation, model training, model registry, signal inference, and evaluation.
 
 ---
 
-## Architecture
+## 2. System Architecture
 
+```mermaid
+flowchart TD
+    A[CLI: bist-predict] --> B[Ingestion Scheduler]
+    B --> C1[Is Yatirim OHLCV]
+    B --> C2[Yahoo Finance fallback]
+    B --> C3[TCMB EVDS macro]
+    B --> C4[Google News and Turkish RSS sentiment]
+    C1 --> D[(SQLite raw_prices)]
+    C2 --> D
+    C3 --> E[(SQLite macro_data)]
+    C4 --> F[(SQLite sentiment_data)]
+    D --> G[Feature Engine]
+    E --> G
+    F --> G
+    G --> H[Rust PyO3 technical indicators]
+    G --> I[Python macro, sentiment, temporal features]
+    G --> J[Quant alpha layer]
+    H --> K[(SQLite features)]
+    I --> K
+    J --> K
+    K --> L[Dataset builders]
+    L --> M1[XGBoost dual head]
+    L --> M2[LightGBM dual head]
+    L --> M3[LSTM dual head]
+    L --> M4[Transformer dual head]
+    M1 --> N[Stacking ensemble]
+    M2 --> N
+    M3 --> N
+    M4 --> N
+    N --> O[Platt calibration]
+    O --> P[Signal tiers]
+    P --> Q[(predictions and accuracy tracking)]
+    L --> R[Walk-forward backtest]
 ```
-CLI Interface (Click)
-    |
-    +-- Data Ingest (Python, async httpx)
-    |       Is Yatirim | Yahoo Finance | TCMB EVDS | Google News RSS
-    |
-    +-- Feature Engine
-    |       Rust (PyO3): RSI, MACD, Bollinger, ATR, OBV, VWAP, ADX, CCI, MFI, ...
-    |       Python: macro deltas, sentiment scores, temporal/calendar features
-    |
-    +-- Quantitative Alpha Layer (Python)
-    |       Kalman | O-U Mean Reversion | GARCH | HMM Regime | Hurst | Wavelets
-    |       Kelly Criterion | Ledoit-Wolf | PCA | Cointegration
-    |
-    +-- Model Layer (Python)
-    |       XGBoost | LightGBM | LSTM | Transformer
-    |       --> Ensemble Meta-Learner --> Platt Calibration
-    |
-    +-- Evaluation (Python)
-    |       Walk-forward backtest | Prediction metrics | Trading metrics
-    |       Live accuracy tracker | Confidence bucket analysis
-    |
-    +-- SQLite Storage
-            raw_prices | macro_data | sentiment_data | features
-            predictions | model_registry
-```
 
-Each layer communicates through well-defined interfaces and can be developed, tested, and iterated independently.
+The implementation uses a layered design:
+
+| Layer | Repository modules | Research function |
+|-------|--------------------|-------------------|
+| Ingestion | `src/bist_predict/ingest/` | Builds the empirical sample from free data sources with validation and fallback. |
+| Storage | `src/bist_predict/storage/` | Persists raw observations, features, predictions, stock universe, and schema metadata. |
+| Feature computation | `src/bist_predict/features/`, `rust/bist_features/` | Converts raw observations into a model-ready representation. |
+| Quant alpha | `src/bist_predict/quant/` | Adds state-space, volatility, factor, regime, signal-quality, and risk features. |
+| Models | `src/bist_predict/models/` | Implements tabular, sequential, ensemble, calibration, and registry abstractions. |
+| Evaluation | `src/bist_predict/evaluation/` | Computes prediction metrics, trading metrics, walk-forward folds, and live accuracy. |
+| Interface | `src/bist_predict/cli.py` | Exposes the research workflow as reproducible CLI commands. |
 
 ---
 
-## Installation
+## 3. Data and Storage Model
+
+The data model is explicitly time-indexed. This matters because the learning task is leakage-sensitive: features at \(t\) must never include outcomes from \(t+1\).
+
+```mermaid
+erDiagram
+    raw_prices {
+        text ticker
+        text date
+        real open
+        real high
+        real low
+        real close
+        real adj_close
+        real volume
+    }
+    macro_data {
+        text indicator
+        text date
+        real value
+    }
+    sentiment_data {
+        text ticker
+        text date
+        text headline
+        real sentiment_score
+    }
+    features {
+        text ticker
+        text date
+        text feature_name
+        real value
+    }
+    predictions {
+        text ticker
+        text prediction_date
+        text target_date
+        text direction
+        real confidence
+        real predicted_pct_move
+        text model_name
+        text actual_direction
+        real actual_pct_move
+    }
+    model_registry {
+        text model_name
+        text version
+        text model_path
+        text metrics_json
+        integer active
+    }
+    tracked_stocks {
+        text ticker
+        integer active
+        text source
+    }
+    raw_prices ||--o{ features : "ticker,date"
+    raw_prices ||--o{ predictions : "target outcome"
+    macro_data ||--o{ features : "date"
+    sentiment_data ||--o{ features : "ticker,date"
+    model_registry ||--o{ predictions : "model_name"
+```
+
+### 3.1 Ingestion Sources
+
+| Data type | Source | Module | Notes |
+|-----------|--------|--------|-------|
+| BIST OHLCV | Is Yatirim API | `ingest/isyatirim.py` | Primary free price source. |
+| BIST OHLCV fallback | Yahoo Finance | `ingest/yahoo.py` | Uses BIST suffix conventions through `yfinance`. |
+| Macro indicators | TCMB EVDS | `ingest/tcmb.py` | Free key required for FX, rates, CPI, gold, and bond indicators. |
+| Sentiment | Google News RSS, Turkish finance RSS | `ingest/sentiment.py` | Lightweight Turkish/finance headline scoring. |
+| Validation | Internal quality module | `ingest/quality.py` | OHLCV consistency, missing-data gaps, and duplicate protection. |
+
+### 3.2 Data Quality Constraints
+
+For each price bar, the system enforces the admissible OHLCV region
+
+$$
+H_{i,t} \geq \max(O_{i,t}, C_{i,t}, L_{i,t}), \qquad
+L_{i,t} \leq \min(O_{i,t}, C_{i,t}, H_{i,t}), \qquad
+V_{i,t} \geq 0.
+$$
+
+Invalid observations are filtered before storage so that downstream feature functions receive a consistent sample.
+
+---
+
+## 4. Feature Construction
+
+The feature engine computes \(\mathbf{x}_{i,t}\) from at most 252 historical price observations ending at \(t\). The resulting vector combines Rust-computed technical features, Python-computed macro/sentiment/calendar features, and quantitative alpha features.
+
+```mermaid
+flowchart LR
+    P[Price history up to t] --> T[Technical indicators]
+    P --> Q[Quant alpha features]
+    M[Macro data at t and prior t'] --> MF[Macro deltas]
+    S[Sentiment records for i,t] --> SF[Sentiment aggregation]
+    C[Calendar date t] --> TF[Cyclical temporal encoding]
+    T --> X[Feature vector x_i,t]
+    Q --> X
+    MF --> X
+    SF --> X
+    TF --> X
+    X --> Y[(features table)]
+```
+
+### 4.1 Technical Indicator Basis
+
+The Rust extension in `rust/bist_features/src/` exposes the high-throughput indicator basis through PyO3. Implemented functions include:
+
+| Family | Features and functions |
+|--------|------------------------|
+| Momentum | RSI(14), MACD(12,26,9), stochastic `%K/%D`, Williams `%R`, CCI(20), MFI(14). |
+| Trend | SMA and EMA over 5, 10, 20, 50, 100, and 200 sessions; ADX(14). |
+| Volatility | Bollinger upper/middle/lower bands, Bollinger width, Bollinger position, ATR(14). |
+| Volume | OBV, VWAP, 20-day volume ratio, raw volume. |
+| Return state | Close, 1-day return, 5-day return, 20-day return. |
+| Candlestick/cross-stock library | Pattern detection, correlation matrix, and beta are exposed by Rust and tested; the current feature orchestrator uses the indicator subset directly. |
+
+Canonical examples:
+
+$$
+\text{SMA}_n(t) = \frac{1}{n}\sum_{k=0}^{n-1} C_{t-k},
+\qquad
+\text{EMA}_n(t) = \alpha C_t + (1-\alpha)\text{EMA}_n(t-1),
+\quad
+\alpha = \frac{2}{n+1}.
+$$
+
+For Bollinger features:
+
+$$
+\mu_{20,t} = \frac{1}{20}\sum_{k=0}^{19} C_{t-k}, \qquad
+s_{20,t} = \sqrt{\frac{1}{19}\sum_{k=0}^{19}(C_{t-k}-\mu_{20,t})^2},
+$$
+
+$$
+B_t^{upper} = \mu_{20,t} + 2s_{20,t}, \qquad
+B_t^{lower} = \mu_{20,t} - 2s_{20,t}, \qquad
+\text{BBPos}_t = \frac{C_t - B_t^{lower}}{B_t^{upper} - B_t^{lower}}.
+$$
+
+For VWAP:
+
+$$
+\text{VWAP}_t =
+\frac{\sum_{\tau \leq t} \left(\frac{H_\tau + L_\tau + C_\tau}{3}\right)V_\tau}
+{\sum_{\tau \leq t}V_\tau}.
+$$
+
+### 4.2 Macro Features
+
+The macro module computes the current value, first difference, and relative difference for each configured TCMB indicator:
+
+$$
+\Delta m_{j,t} = m_{j,t} - m_{j,t^-},
+\qquad
+\delta m_{j,t} = \frac{m_{j,t} - m_{j,t^-}}{m_{j,t^-}},
+$$
+
+where \(t^-\) is the previous available observation date for indicator \(j\). Implemented indicator keys are:
+
+| Indicator | Feature names |
+|-----------|---------------|
+| `USD_TRY` | `usd_try_value`, `usd_try_delta`, `usd_try_pct` |
+| `EUR_TRY` | `eur_try_value`, `eur_try_delta`, `eur_try_pct` |
+| `GOLD_TRY` | `gold_try_value`, `gold_try_delta`, `gold_try_pct` |
+| `POLICY_RATE` | `policy_rate_value`, `policy_rate_delta`, `policy_rate_pct` |
+| `CPI` | `cpi_value`, `cpi_delta`, `cpi_pct` |
+| `BOND_2Y` | `bond_2y_value`, `bond_2y_delta`, `bond_2y_pct` |
+
+### 4.3 Sentiment Features
+
+For a ticker \(i\), date \(t\), and sentiment scores \(a_{i,t,k}\), the system computes:
+
+$$
+\bar{a}_{i,t} = \frac{1}{K_{i,t}}\sum_{k=1}^{K_{i,t}}a_{i,t,k},
+\qquad
+\rho^+_{i,t} = \frac{1}{K_{i,t}}\sum_{k=1}^{K_{i,t}}\mathbb{1}\{a_{i,t,k} > 0\}.
+$$
+
+Stored sentiment features are `sentiment_mean`, `sentiment_count`, `sentiment_positive_ratio`, `sentiment_max`, and `sentiment_min`.
+
+### 4.4 Temporal Features
+
+Calendar periodicity is represented with both categorical-like flags and continuous cyclical encodings:
+
+$$
+d_t^{sin} = \sin\left(\frac{2\pi \cdot \text{dow}(t)}{7}\right),
+\qquad
+d_t^{cos} = \cos\left(\frac{2\pi \cdot \text{dow}(t)}{7}\right),
+$$
+
+with analogous month encodings. Additional tested calendar features include day of month, quarter, week of year, Monday/Friday flags, month-start flag, and month-end flag.
+
+---
+
+## 5. Quantitative Alpha Derivations
+
+The quantitative layer is not treated as side metadata. It formalizes alternative hypotheses about return generation: trend persistence, mean reversion, latent regime, conditional volatility, cross-sectional factor exposure, and signal reliability.
+
+### 5.1 Kalman Trend Filter
+
+`quant/statistical.py` implements a two-dimensional state-space model:
+
+$$
+\mathbf{z}_t =
+\begin{bmatrix}
+\ell_t \\
+v_t
+\end{bmatrix},
+\qquad
+\mathbf{z}_t =
+\underbrace{
+\begin{bmatrix}
+1 & 1 \\
+0 & 1
+\end{bmatrix}}_{\mathbf{F}}
+\mathbf{z}_{t-1} + \mathbf{w}_t,
+\qquad
+C_t =
+\underbrace{\begin{bmatrix}1 & 0\end{bmatrix}}_{\mathbf{H}}
+\mathbf{z}_t + \epsilon_t.
+$$
+
+Prediction and update:
+
+$$
+\hat{\mathbf{z}}_{t|t-1} = \mathbf{F}\hat{\mathbf{z}}_{t-1|t-1}, \qquad
+\mathbf{P}_{t|t-1} = \mathbf{F}\mathbf{P}_{t-1|t-1}\mathbf{F}^\top + \mathbf{Q},
+$$
+
+$$
+\mathbf{K}_t = \mathbf{P}_{t|t-1}\mathbf{H}^\top
+\left(\mathbf{H}\mathbf{P}_{t|t-1}\mathbf{H}^\top + \mathbf{R}\right)^{-1},
+$$
+
+$$
+\hat{\mathbf{z}}_{t|t} =
+\hat{\mathbf{z}}_{t|t-1}
++ \mathbf{K}_t(C_t-\mathbf{H}\hat{\mathbf{z}}_{t|t-1}).
+$$
+
+Exported features: `kalman_trend`, `kalman_velocity`, `kalman_variance`.
+
+### 5.2 Ornstein-Uhlenbeck Mean Reversion
+
+The mean-reversion model assumes:
+
+$$
+dX_t = \theta(\mu - X_t)dt + \sigma dW_t.
+$$
+
+With discrete observations, the implementation estimates:
+
+$$
+\Delta X_t = a + bX_t + \varepsilon_t,
+\qquad
+\hat{\theta} = -\hat{b},
+\qquad
+\hat{\mu} = -\frac{\hat{a}}{\hat{b}}.
+$$
+
+The standardized deviation and signal are:
+
+$$
+z_t = \frac{X_t-\hat{\mu}}{\hat{\sigma}},
+\qquad
+s^{OU}_t = -z_t\hat{\theta}.
+$$
+
+Exported features: `ou_theta`, `ou_mu`, `ou_sigma`, `ou_deviation`, `ou_signal`.
+
+### 5.3 GARCH(1,1) Volatility Forecast
+
+The conditional variance model is:
+
+$$
+\sigma_t^2 = \omega + \alpha \epsilon_{t-1}^2 + \beta \sigma_{t-1}^2.
+$$
+
+The repository fits a zero-mean GARCH(1,1) process through the `arch` package, forecasts one-step volatility, annualizes it, and reports volatility surprise:
+
+$$
+\text{VolSurprise}_{t+1} =
+\frac{|r_t|}{\hat{\sigma}_{t+1}}.
+$$
+
+Exported features: `garch_vol_forecast`, `garch_vol_surprise`, `garch_omega`, `garch_alpha`, `garch_beta`.
+
+### 5.4 Hidden Markov Regime Model
+
+The HMM uses observations:
+
+$$
+\mathbf{o}_t = [r_t, r_t^2],
+$$
+
+with latent regime \(z_t \in \{1,\dots,K\}\), transition matrix \(A\), and Gaussian emissions:
+
+$$
+P(z_t=j \mid z_{t-1}=i) = A_{ij},
+\qquad
+\mathbf{o}_t \mid z_t=k \sim \mathcal{N}(\boldsymbol{\mu}_k,\boldsymbol{\Sigma}_k).
+$$
+
+For \(K=3\), states are labeled by mean return: lowest mean as bear, highest mean as bull, and the middle state as sideways. Exported values include current state and posterior bull/bear/sideways probabilities.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Bull
+    Bull --> Bull: A_bb
+    Bull --> Bear: A_ba
+    Bull --> Sideways: A_bs
+    Bear --> Bear: A_aa
+    Bear --> Bull: A_ab
+    Bear --> Sideways: A_as
+    Sideways --> Sideways: A_ss
+    Sideways --> Bull: A_sb
+    Sideways --> Bear: A_sa
+```
+
+### 5.5 Momentum and Factor Models
+
+Time-series momentum:
+
+$$
+R^{(L)}_{i,t} = \frac{C_{i,t} - C_{i,t-L}}{C_{i,t-L}},
+\qquad
+s^{TSMOM}_{i,t} =
+\begin{cases}
++1, & R^{(L)}_{i,t} > 0, \\
+-1, & R^{(L)}_{i,t} \leq 0.
+\end{cases}
+$$
+
+Cross-sectional momentum ranks trailing cumulative returns into percentile scores. The adapted Fama-French module computes:
+
+$$
+SMB_t = \frac{1}{|\mathcal{S}|}\sum_{i \in \mathcal{S}}r_{i,t}
+- \frac{1}{|\mathcal{B}|}\sum_{i \in \mathcal{B}}r_{i,t},
+$$
+
+$$
+HML_t = \frac{1}{|\mathcal{H}|}\sum_{i \in \mathcal{H}}r_{i,t}
+- \frac{1}{|\mathcal{L}|}\sum_{i \in \mathcal{L}}r_{i,t},
+$$
+
+then estimates stock exposures by OLS:
+
+$$
+r_{i,t} = \alpha_i + \beta_{i,m}MKT_t + \beta_{i,s}SMB_t + \beta_{i,h}HML_t + \epsilon_{i,t}.
+$$
+
+### 5.6 Signal Quality and Risk
+
+Information coefficient:
+
+$$
+IC_t = \rho_{Spearman}(\hat{r}_{:,t}, r_{:,t}).
+$$
+
+Kelly fraction:
+
+$$
+f^* = \frac{pb - q}{b},
+\qquad q = 1-p,
+$$
+
+with fractional sizing \(f = \lambda f^*\), where the default implementation uses conservative fractional Kelly.
+
+Ledoit-Wolf shrinkage estimates covariance as:
+
+$$
+\hat{\Sigma}_{LW} = \lambda \mathbf{T} + (1-\lambda)\mathbf{S},
+$$
+
+where \(\mathbf{S}\) is the empirical covariance matrix and \(\mathbf{T}\) is a structured shrinkage target.
+
+PCA factor extraction solves:
+
+$$
+\max_{\mathbf{w}_k:\|\mathbf{w}_k\|_2=1}
+\mathbf{w}_k^\top \Sigma \mathbf{w}_k,
+$$
+
+subject to orthogonality constraints for later components.
+
+---
+
+## 6. Learning Algorithms
+
+The repository defines a shared `PredictionModel` protocol. Every model returns:
+
+$$
+\left(\hat{p}_{i,t+1}, \hat{r}_{i,t+1}\right)
+=
+\texttt{model.predict}(\mathbf{x}_{i,t}).
+$$
+
+### 6.1 Dataset Construction
+
+The tabular dataset builder joins stored features and next-day closes:
+
+```mermaid
+sequenceDiagram
+    participant DB as SQLite
+    participant FS as FeatureStore
+    participant B as build_tabular_dataset
+    participant M as Model
+    DB->>B: ordered feature dates for ticker
+    DB->>B: ordered close prices
+    B->>FS: load(ticker, date)
+    FS-->>B: feature dictionary
+    B->>B: sort canonical feature names
+    B->>B: y_dir = 1[pct_move > 0]
+    B->>B: y_pct = pct_move
+    B-->>M: X, y_dir, y_pct, valid_dates
+```
+
+For sequential models, `build_sequence_dataset` converts tabular snapshots into:
+
+$$
+\mathbf{X}^{seq}_{n} =
+\left[
+\mathbf{x}_{t-L},
+\mathbf{x}_{t-L+1},
+\dots,
+\mathbf{x}_{t-1}
+\right]
+\in \mathbb{R}^{L \times d}.
+$$
+
+### 6.2 Dual-Head Objective
+
+The tree and neural models optimize separate direction and return heads. For neural models, the combined loss is:
+
+$$
+\mathcal{L}(\theta)
+=
+\underbrace{
+-\frac{1}{N}\sum_{n=1}^{N}
+\left[
+y_n\log \hat{p}_n + (1-y_n)\log(1-\hat{p}_n)
+\right]}_{\text{binary cross entropy}}
++
+\underbrace{
+\frac{1}{N}\sum_{n=1}^{N}
+(\hat{r}_n-r_n)^2}_{\text{return regression MSE}}.
+$$
+
+For XGBoost and LightGBM, the classifier and regressor heads are fitted as independent estimators over the same feature matrix.
+
+### 6.3 Model Library
+
+| Model | Module | Input | Output heads | Current operational status |
+|-------|--------|-------|--------------|----------------------------|
+| XGBoost | `models/xgboost_model.py` | Tabular \(N \times d\) | classifier + regressor | Trained by CLI. |
+| LightGBM | `models/lightgbm_model.py` | Tabular \(N \times d\) | classifier + regressor | Trained by CLI. |
+| LSTM | `models/lstm_model.py` | Sequence \(N \times L \times d\) | sigmoid direction + linear return | Implemented, tested, protocol-compatible. |
+| Transformer | `models/transformer_model.py` | Sequence \(N \times L \times d\) | sigmoid direction + linear return | Implemented, tested, protocol-compatible. |
+
+### 6.4 LSTM Representation
+
+The LSTM state transition is:
+
+$$
+\begin{aligned}
+\mathbf{i}_t &= \sigma(W_i\mathbf{x}_t + U_i\mathbf{h}_{t-1} + \mathbf{b}_i),\\
+\mathbf{f}_t &= \sigma(W_f\mathbf{x}_t + U_f\mathbf{h}_{t-1} + \mathbf{b}_f),\\
+\mathbf{o}_t &= \sigma(W_o\mathbf{x}_t + U_o\mathbf{h}_{t-1} + \mathbf{b}_o),\\
+\tilde{\mathbf{c}}_t &= \tanh(W_c\mathbf{x}_t + U_c\mathbf{h}_{t-1} + \mathbf{b}_c),\\
+\mathbf{c}_t &= \mathbf{f}_t \odot \mathbf{c}_{t-1} + \mathbf{i}_t \odot \tilde{\mathbf{c}}_t,\\
+\mathbf{h}_t &= \mathbf{o}_t \odot \tanh(\mathbf{c}_t).
+\end{aligned}
+$$
+
+The repository maps the final hidden state to two heads:
+
+$$
+\hat{p}_{t+1} = \sigma(g_{dir}(\mathbf{h}_T)),
+\qquad
+\hat{r}_{t+1} = g_{reg}(\mathbf{h}_T).
+$$
+
+### 6.5 Transformer Representation
+
+The Transformer encoder first projects feature vectors into \(d_{model}\), adds sinusoidal positional encodings, then applies multi-head self-attention:
+
+$$
+\text{Attention}(Q,K,V) =
+\text{softmax}\left(\frac{QK^\top}{\sqrt{d_k}}\right)V.
+$$
+
+For head \(h\):
+
+$$
+\text{head}_h =
+\text{Attention}(XW_h^Q, XW_h^K, XW_h^V),
+\qquad
+\text{MHA}(X) =
+\text{Concat}(\text{head}_1,\dots,\text{head}_H)W^O.
+$$
+
+The final token representation is used for the direction and return heads.
+
+### 6.6 Stacking Ensemble
+
+The ensemble combiner stacks model outputs into meta-features:
+
+$$
+\mathbf{z}^{dir}_{n} =
+\left[
+\hat{p}^{(1)}_n,\dots,\hat{p}^{(M)}_n
+\right],
+\qquad
+\mathbf{z}^{ret}_{n} =
+\left[
+\hat{r}^{(1)}_n,\dots,\hat{r}^{(M)}_n
+\right].
+$$
+
+Direction stacking uses logistic regression:
+
+$$
+\hat{p}^{ens}_n =
+\sigma\left(\alpha + \boldsymbol{\beta}^{\top}\mathbf{z}^{dir}_{n}\right),
+$$
+
+and return stacking uses ridge regression:
+
+$$
+\hat{\boldsymbol{\beta}} =
+\arg\min_{\boldsymbol{\beta}}
+\left\|
+\mathbf{y}^{ret} - \mathbf{Z}^{ret}\boldsymbol{\beta}
+\right\|_2^2
++ \lambda \left\|\boldsymbol{\beta}\right\|_2^2.
+$$
+
+If the meta-learner is not trained, predictions fall back to simple averaging.
+
+---
+
+## 7. Calibration, Signal Tiers, and Decision Rule
+
+### 7.1 Platt Scaling
+
+The calibration module fits:
+
+$$
+P(y=1 \mid a) =
+\frac{1}{1+\exp(Aa+B)},
+$$
+
+where \(a\) is an uncalibrated score or raw probability transformed as a scalar input. This turns confidence into an empirical probability statement.
+
+### 7.2 Signal Tier Function
+
+For direction \(d\) and confidence \(c\), the signal-tier function is:
+
+$$
+\tau(d,c) =
+\begin{cases}
+\text{STRONG BUY}, & d=\text{UP}, c \geq 0.80,\\
+\text{BUY}, & d=\text{UP}, 0.70 \leq c < 0.80,\\
+\text{STRONG SELL}, & d=\text{DOWN}, c \geq 0.80,\\
+\text{SELL}, & d=\text{DOWN}, 0.70 \leq c < 0.80,\\
+\text{HOLD}, & \text{otherwise}.
+\end{cases}
+$$
+
+The inference path currently loads active XGBoost and LightGBM models from the model registry. If a model expects a different feature dimension than the latest feature row, that ticker/model pair is skipped to prevent schema-incompatible inference.
+
+---
+
+## 8. Evaluation Protocol
+
+### 8.1 Walk-Forward Backtesting
+
+The backtest engine constructs folds:
+
+$$
+\mathcal{D}^{train}_k =
+\{t_k,\dots,t_k+W_{train}-1\},
+\qquad
+\mathcal{D}^{val}_k =
+\{t_k+W_{train},\dots,t_k+W_{train}+W_{val}-1\}.
+$$
+
+With defaults \(W_{train}=252\), \(W_{val}=63\), and step size \(21\), each validation block is strictly later than its training block.
+
+```mermaid
+gantt
+    title Walk-forward validation geometry
+    dateFormat  X
+    axisFormat %s
+    section Fold 1
+    Train 1 :0, 252
+    Validate 1 :252, 63
+    section Fold 2
+    Train 2 :21, 252
+    Validate 2 :273, 63
+    section Fold 3
+    Train 3 :42, 252
+    Validate 3 :294, 63
+```
+
+Trading costs are applied on entry and exit:
+
+$$
+r^{net} = r^{gross} - 2c_{commission} - 2c_{slippage}.
+$$
+
+### 8.2 Prediction Metrics
+
+`evaluation/metrics.py` computes:
+
+$$
+\text{Accuracy} = \frac{TP+TN}{TP+TN+FP+FN},
+\qquad
+\text{Precision} = \frac{TP}{TP+FP},
+\qquad
+\text{Recall} = \frac{TP}{TP+FN},
+$$
+
+$$
+F_1 = \frac{2 \cdot \text{Precision}\cdot \text{Recall}}
+{\text{Precision}+\text{Recall}},
+\qquad
+\text{Brier} = \frac{1}{N}\sum_{n=1}^{N}(\hat{p}_n-y_n)^2,
+$$
+
+$$
+\text{MAE}_{ret} =
+\frac{1}{N}\sum_{n=1}^{N}
+|\hat{r}_n-r_n|.
+$$
+
+The AUC-ROC is computed where class diversity permits it.
+
+### 8.3 Trading Metrics
+
+For daily strategy returns \(R_t\):
+
+$$
+\text{Sharpe} =
+\frac{\mathbb{E}[R_t-r_f/252]}{\sqrt{\text{Var}(R_t-r_f/252)}}\sqrt{252},
+$$
+
+$$
+\text{Sortino} =
+\frac{\mathbb{E}[R_t-r_f/252]}{\sqrt{\text{Var}(\min(R_t-r_f/252,0))}}\sqrt{252},
+$$
+
+$$
+\text{MaxDrawdown} =
+\min_t
+\frac{\prod_{\tau \leq t}(1+R_\tau)
+- \max_{u \leq t}\prod_{\tau \leq u}(1+R_\tau)}
+{\max_{u \leq t}\prod_{\tau \leq u}(1+R_\tau)}.
+$$
+
+Additional tracked metrics include win rate, profit factor, average win/loss ratio, Calmar ratio, and total return.
+
+---
+
+## 9. Installation
 
 ### Prerequisites
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
-- Rust toolchain (for the Rust feature engine, optional)
-- Homebrew `libomp` on macOS (required by XGBoost): `brew install libomp`
+- Rust toolchain for the Rust feature engine
+- Homebrew `libomp` on macOS, required by XGBoost: `brew install libomp`
 
 ### Install
 
@@ -90,17 +803,17 @@ cd BIST-Predictorcl
 # Install Python dependencies
 uv sync
 
-# (Optional) Build the Rust feature engine for maximum performance
+# Optional: build the Rust feature engine for maximum performance
 cd rust/bist_features
 maturin develop --release
 cd ../..
 ```
 
-If the Rust module is not compiled, the system falls back to Python-only feature computation (technical indicators won't be available, but quant features, macro, sentiment, and temporal features still work).
+If the Rust module is not compiled, the system falls back to Python-only feature computation. Macro, sentiment, temporal, and quantitative features still work; Rust technical indicators are unavailable until the extension is built.
 
 ---
 
-## Quick Start
+## 10. Quick Start
 
 ```bash
 # 1. Fetch market data (last 90 days)
@@ -119,9 +832,16 @@ uv run bist-predict signals
 uv run bist-predict accuracy
 ```
 
+End-to-end pipeline command:
+
+```bash
+uv run bist-predict pipeline --days 365
+uv run bist-predict pipeline --days 365 --ticker THYAO --detail
+```
+
 ---
 
-## CLI Commands
+## 11. CLI Commands
 
 ### `bist-predict fetch`
 
@@ -133,19 +853,19 @@ uv run bist-predict fetch --days 90          # Fetch last 90 days
 uv run bist-predict fetch --ticker THYAO     # Fetch a single stock
 ```
 
-Fetches OHLCV prices (Is Yatirim primary, Yahoo Finance fallback), TCMB macro indicators (requires API key), and Google News sentiment headlines. Supports incremental fetch -- only pulls data newer than the last stored date.
+Fetches OHLCV prices, TCMB macro indicators when an API key is configured, and Google News sentiment records. The scheduler uses Is Yatirim as the primary price source and Yahoo Finance as fallback. Incremental fetching only requests dates newer than the latest stored date.
 
 ### `bist-predict features`
 
-Compute features for the latest data.
+Compute features from stored raw data.
 
 ```bash
-uv run bist-predict features                           # All stocks, today
+uv run bist-predict features                           # Backfill missing feature dates
 uv run bist-predict features --ticker THYAO             # Single stock
 uv run bist-predict features --date 2026-03-15          # Specific date
 ```
 
-Runs the full feature pipeline: Rust technical indicators (30+), quantitative alpha features (Kalman, O-U, GARCH, Hurst, TSMOM), macro deltas, sentiment aggregation, and temporal/calendar features. Stores results in the SQLite feature store.
+Runs the full feature pipeline: Rust technical indicators when available, quantitative alpha features, macro deltas, sentiment aggregation, and temporal features. Results are stored in SQLite keyed by `(ticker, date, feature_name)`.
 
 ### `bist-predict train`
 
@@ -156,21 +876,21 @@ uv run bist-predict train                    # Train on all stocks
 uv run bist-predict train --ticker THYAO     # Train on one stock only
 ```
 
-Builds tabular datasets from the feature store, splits 80/20 for training/validation, and trains XGBoost and LightGBM models with dual prediction heads (direction classification + percentage move regression). Saves trained models to disk and registers them in the model registry with validation metrics.
+Builds tabular datasets from the feature store, splits observations 80/20 in chronological order, trains active tabular models, saves model artifacts, and registers active versions in the model registry.
 
 ### `bist-predict signals`
 
-Get today's trading signals.
+Get current trading signals.
 
 ```bash
 uv run bist-predict signals                  # All stocks
 uv run bist-predict signals --ticker THYAO   # Single stock
-uv run bist-predict signals --detail         # Detailed breakdown
+uv run bist-predict signals --detail         # Detailed breakdown including HOLD
 ```
 
-Loads the active model versions from the registry, runs inference on the latest features, and outputs signals grouped by confidence tier:
+Example output:
 
-```
+```text
 ========================================
   STRONG BUY
 ========================================
@@ -183,19 +903,25 @@ Loads the active model versions from the registry, runs inference on the latest 
   AKBNK    74.3% conf  +0.67% target  (xgboost)
 ```
 
-Signal tiers:
-- **STRONG BUY**: >= 80% UP confidence
-- **BUY**: 70-80% UP confidence
-- **SELL**: 70-80% DOWN confidence
-- **STRONG SELL**: >= 80% DOWN confidence
+### `bist-predict pipeline`
+
+Run fetch, feature generation, training, and signal generation end to end.
+
+```bash
+uv run bist-predict pipeline
+uv run bist-predict pipeline --days 365
+uv run bist-predict pipeline --ticker THYAO --detail
+```
 
 ### `bist-predict backtest`
 
-Run walk-forward backtest (integration pending -- engine and metrics are complete).
+Run walk-forward backtest.
 
 ```bash
 uv run bist-predict backtest
 ```
+
+The fold generator, cost model, and metrics are implemented and tested. The CLI command currently reports that full model/backtest integration is pending.
 
 ### `bist-predict accuracy`
 
@@ -206,332 +932,135 @@ uv run bist-predict accuracy                 # Top 5 stocks
 uv run bist-predict accuracy --ticker THYAO  # Single stock with confidence buckets
 ```
 
-Shows rolling 30-day and 90-day directional accuracy. For individual stocks, also displays confidence bucket analysis (accuracy at 60-70%, 70-80%, 80-90%, 90-100% confidence levels).
+For a single ticker, this also displays confidence bucket analysis across 60-70%, 70-80%, 80-90%, and 90-100% confidence ranges.
 
 ### `bist-predict stocks`
 
-List all 30 tracked BIST-100 stocks.
+List all tracked stocks from the persistent DB universe.
+
+```bash
+uv run bist-predict stocks
+```
 
 ### `bist-predict config`
 
-Display current configuration (database path, API keys, backtest parameters).
+Display current configuration.
+
+```bash
+uv run bist-predict config
+```
 
 ---
 
-## Pipeline Deep Dive
-
-### 1. Data Ingestion
-
-The ingestion layer collects three categories of data from free sources:
-
-#### OHLCV Price Data
-
-| Source | Role | Details |
-|--------|------|---------|
-| **Is Yatirim API** | Primary | Undocumented REST API, most accurate BIST data |
-| **Yahoo Finance** | Fallback | Via `yfinance`, BIST tickers use `.IS` suffix |
-
-Automatic failover: tries Is Yatirim first, falls back to Yahoo Finance on timeout or rate limit. All data stored as daily OHLCV bars with adjusted close.
-
-#### Macro Data (TCMB EVDS)
-
-Requires a free API key from [evds2.tcmb.gov.tr](https://evds2.tcmb.gov.tr):
-
-- USD/TRY and EUR/TRY exchange rates (daily)
-- TCMB policy interest rate
-- CPI / inflation data (monthly)
-- Gold price XAU/TRY (daily)
-- Government bond yields (daily)
-
-#### Sentiment Data
-
-- **Google News RSS** -- headline search per ticker + "borsa" keywords, no API key
-- **Turkish finance RSS** -- bloomberght, bigpara feeds with Turkish NLP scoring
-
-#### Data Quality
-
-The quality module (`ingest/quality.py`) validates all incoming data:
-- OHLCV logical consistency (open/high/low/close relationships)
-- Gap detection (> 5 trading days flags halts/delistings)
-- Rate limiting with configurable delays and exponential backoff
-- Incremental fetching (only new data since last stored date)
-
-### 2. Feature Engine (Rust + Python)
-
-#### Rust-Computed Technical Indicators (~30+)
-
-Compiled to a Python extension via PyO3 for maximum performance:
-
-| Category | Indicators |
-|----------|-----------|
-| **Momentum** | RSI (14), MACD (12/26/9), Stochastic %K/%D, Williams %R, CCI (20), MFI (14) |
-| **Trend** | SMA (5/10/20/50/100/200), EMA (5/10/20/50/100/200), ADX (14) |
-| **Volatility** | Bollinger Bands (20), ATR (14) |
-| **Volume** | OBV, VWAP, volume ratio (20d) |
-| **Patterns** | Doji, hammer, engulfing, morning star detection |
-| **Cross-stock** | Correlation matrix, beta to BIST-100 index |
-
-Source: `rust/bist_features/src/` -- `indicators.rs`, `patterns.rs`, `correlations.rs`
-
-#### Python-Computed Features
-
-| Category | Features |
-|----------|---------|
-| **Macro** | USD/TRY delta, EUR/TRY delta, interest rate change, CPI trend, gold delta, bond yield spread, percentage changes |
-| **Sentiment** | Mean sentiment, count, positive ratio per stock per day |
-| **Temporal** | Day of week (sin/cos encoded), month (sin/cos encoded), quarter, is_monday, is_friday |
-| **Price-derived** | 1d/5d/20d returns, close, volume |
-
-The feature engine (`features/engine.py`) orchestrates all computation and stores results in the SQLite feature store keyed by `(ticker, date, feature_name)`.
-
-### 3. Quantitative Alpha Layer
-
-This layer provides institutional-grade quantitative methods that serve three roles:
-1. **Extra features** fed into ML models
-2. **Independent signals** for momentum, mean reversion, and pairs trading
-3. **Model routing control** via regime detection
-
-#### Factor Models & Alpha Signals
-
-| Method | Implementation | Output |
-|--------|---------------|--------|
-| **Time-series Momentum** (Moskowitz et al., 2012) | `quant/factors.py` | TSMOM signal + magnitude per stock |
-| **Mean Reversion** (Ornstein-Uhlenbeck) | `quant/factors.py` | theta (speed), mu (mean), deviation, half-life |
-| **Fama-French adapted** | `quant/factors.py` | SMB, HML factor scores for BIST |
-
-#### Statistical Methods
-
-| Method | Implementation | Purpose |
-|--------|---------------|---------|
-| **Kalman Filter** | `quant/statistical.py` | Tracks hidden "true momentum", filters noise, adapts to volatility |
-| **Hidden Markov Model** (3-state) | `quant/statistical.py` | Bull/bear/sideways regime detection on BIST-100 returns + volatility |
-| **GARCH(1,1)** | `quant/statistical.py` | Per-stock volatility forecasting for confidence calibration and position sizing |
-| **Cointegration** (Engle-Granger) | `quant/statistical.py` | Finds cointegrated stock pairs, outputs spread z-score and half-life |
-
-#### Signal Quality Measurement
-
-| Method | Implementation | What it tells you |
-|--------|---------------|-------------------|
-| **Information Coefficient** | `quant/signal_quality.py` | Rank correlation between predicted and actual returns (IC > 0.05 = meaningful) |
-| **Hurst Exponent** | `quant/signal_quality.py` | H > 0.5 = trending (trust momentum), H < 0.5 = mean-reverting (trust O-U), H ~ 0.5 = random walk |
-| **Wavelet Decomposition** | `quant/signal_quality.py` | Separates price into frequency bands: daily noise, weekly cycles, monthly trends |
-
-#### Risk & Position Sizing
-
-| Method | Implementation | Purpose |
-|--------|---------------|---------|
-| **Kelly Criterion** | `quant/risk.py` | Optimal bet sizing: f* = (p*b - q) / b, with fractional Kelly (0.25x) for safety |
-| **Ledoit-Wolf Shrinkage** | `quant/risk.py` | Robust covariance estimation, prevents overfitting to noisy correlations |
-| **PCA Factor Extraction** | `quant/risk.py` | Extracts latent market drivers from BIST-100 return matrix |
-
-#### Regime-Aware Routing
-
-The HMM regime detection (`quant/regime.py`) dynamically adjusts ensemble weights:
-
-| Regime | Momentum Weight | Mean Reversion Weight | Pairs Weight | Kelly Fraction |
-|--------|----------------|----------------------|-------------|---------------|
-| **Bull** (high prob) | High | Low | Low | 0.5x |
-| **Bear** (high prob) | Low | High | Low | 0.25x |
-| **Sideways** (high prob) | Low | Low | High | 0.25x |
-| **Uncertain** | Equal | Equal | Equal | 0.25x |
-
-### 4. Model Layer
-
-#### Individual Models
-
-All four models implement the same `PredictionModel` protocol with dual prediction heads:
-
-| Model | Input Shape | Strength | Implementation |
-|-------|------------|----------|----------------|
-| **XGBoost** | Tabular (n_samples, n_features) | Best tabular performance, feature importance | `models/xgboost_model.py` |
-| **LightGBM** | Tabular (n_samples, n_features) | Faster training, categorical handling, diversity | `models/lightgbm_model.py` |
-| **LSTM** | Sequences (n_samples, 30, n_features) | Temporal dependencies, momentum shifts | `models/lstm_model.py` |
-| **Transformer** | Sequences (n_samples, 60, n_features) | Long-range attention, event detection | `models/transformer_model.py` |
-
-Each model produces:
-- **Classification head** -- P(UP) probability (sigmoid output)
-- **Regression head** -- predicted percentage move
-
-#### Ensemble Combiner
-
-The meta-learner (`models/ensemble.py`) stacks predictions from all individual models:
-
-- **Direction**: Logistic regression on stacked P(UP) probabilities
-- **Percentage move**: Ridge regression on stacked percentage predictions
-- **Fallback**: Simple averaging when meta-learner isn't trained
-- **Regime modulation**: Weights can be adjusted by HMM regime probabilities
-
-#### Confidence Calibration
-
-Platt scaling (`models/calibration.py`) fits a sigmoid to map raw ensemble scores to calibrated probabilities. This ensures that when the system reports "78% confidence", historically ~78% of such predictions were correct. Configurable minimum confidence threshold (default: 60%).
-
-#### Model Registry
-
-The SQLite-based registry (`models/registry.py`) tracks all trained model versions:
-- Register models with path, version, and validation metrics
-- Activate/deactivate model versions per model type
-- Query active models for inference
-- Supports multiple versions for A/B testing and rollback
-
-### 5. Evaluation & Backtesting
-
-#### Walk-Forward Backtesting
-
-The backtesting engine (`evaluation/backtest.py`) implements honest evaluation:
-
-- **Walk-forward only** -- train on past data, test on future data, slide window forward
-- **Configurable windows** -- 252-day training, 63-day validation, 21-day step size (defaults)
-- **Realistic costs** -- commission (0.1%) and slippage (0.05%) applied on both entry and exit
-- **No future leakage** -- training data timestamps always precede test data
-- **Signal delay** -- prediction at market close, trade assumed at next-day open
-
-#### Prediction Quality Metrics
-
-`evaluation/metrics.py` computes:
-
-| Metric | What it measures |
-|--------|-----------------|
-| **Accuracy** | % of correct direction predictions |
-| **Precision** | Of predicted UPs, how many were actually UP |
-| **Recall** | Of actual UPs, how many did we predict |
-| **F1 Score** | Harmonic mean of precision and recall |
-| **AUC-ROC** | Discrimination ability across all thresholds |
-| **Brier Score** | Calibration quality of probability estimates |
-| **MAE** | Mean absolute error on percentage move predictions |
-
-#### Trading Quality Metrics
-
-| Metric | What it measures |
-|--------|-----------------|
-| **Sharpe Ratio** | Risk-adjusted return (annualized) |
-| **Sortino Ratio** | Downside-risk-adjusted return |
-| **Max Drawdown** | Largest peak-to-trough decline |
-| **Win Rate** | % of profitable trades |
-| **Profit Factor** | Gross profits / gross losses |
-| **Calmar Ratio** | Return / max drawdown |
-| **Total Return** | Cumulative portfolio return |
-
-#### Live Accuracy Tracking
-
-The tracker (`evaluation/tracker.py`) provides ongoing monitoring:
-
-- Every prediction logged with timestamp, confidence, direction, predicted % move
-- Actual outcomes recorded on next data fetch
-- **Rolling accuracy** over configurable windows (30/60/90 days)
-- **Per-stock breakdown** to identify model strengths/weaknesses
-- **Confidence bucket analysis** -- verifies that higher confidence predictions are actually more accurate (60-70%, 70-80%, 80-90%, 90-100%)
-
----
-
-## Configuration
+## 12. Configuration
 
 Create a `config.toml` in the project root:
 
 ```toml
 [data]
 tcmb_api_key = ""           # Free key from evds2.tcmb.gov.tr
-fetch_retries = 3            # Max retries per data source
-rate_limit_delay = 1.0       # Seconds between API calls
+fetch_retries = 3           # Max retries per data source
+rate_limit_delay = 1.0      # Seconds between API calls
 
 [signals]
-min_confidence = 0.70        # Minimum confidence to display signal
-lookback_days = 30           # Feature computation lookback
+min_confidence = 0.70       # Minimum confidence to display signal
+lookback_days = 30          # Feature computation lookback
 
 [models]
 retrain_interval = "monthly" # Retrain cadence
 ensemble_weights = "learned" # "learned" or "equal"
 
 [quant]
-hmm_states = 3               # HMM regime states (bull/bear/sideways)
-kelly_fraction = 0.25         # Fractional Kelly multiplier
-hurst_window = 252            # Hurst exponent lookback window
+hmm_states = 3              # HMM regime states: bull, bear, sideways
+kelly_fraction = 0.25       # Fractional Kelly multiplier
+hurst_window = 252          # Hurst exponent lookback window
 
 [backtest]
-commission = 0.001            # 0.1% per trade
-slippage = 0.0005             # 0.05% per trade
+commission = 0.001          # 0.1% per trade
+slippage = 0.0005           # 0.05% per trade
 ```
 
 ---
 
-## Project Structure
+## 13. Project Structure
 
-```
+```text
 BIST-Predictorcl/
 +-- README.md
-+-- CLAUDE.md                          # Development instructions
-+-- pyproject.toml                     # Python project config
-+-- config.toml                        # Runtime configuration
++-- pyproject.toml
++-- config.example.toml
++-- Cargo.toml
++-- Cargo.lock
++-- uv.lock
 |
 +-- src/bist_predict/
-|   +-- cli.py                         # Click CLI entry point (8 commands)
-|   +-- config.py                      # Configuration loading
+|   +-- cli.py
+|   +-- config.py
 |   |
-|   +-- ingest/                        # Data collection layer
-|   |   +-- isyatirim.py               # Is Yatirim API client (primary)
-|   |   +-- yahoo.py                   # Yahoo Finance client (fallback)
-|   |   +-- tcmb.py                    # TCMB EVDS macro data
-|   |   +-- sentiment.py               # Google News + Turkish RSS sentiment
-|   |   +-- scheduler.py               # Orchestrates all collectors
-|   |   +-- quality.py                 # OHLCV validation, gap detection
-|   |   +-- types.py                   # PriceBar, MacroPoint, SentimentRecord
+|   +-- ingest/
+|   |   +-- isyatirim.py
+|   |   +-- yahoo.py
+|   |   +-- tcmb.py
+|   |   +-- sentiment.py
+|   |   +-- scheduler.py
+|   |   +-- quality.py
+|   |   +-- types.py
 |   |
-|   +-- features/                      # Feature computation
-|   |   +-- engine.py                  # Orchestrates Rust + Python features
-|   |   +-- store.py                   # SQLite feature store (ticker, date)
-|   |   +-- macro_features.py          # Macro deltas and pct changes
-|   |   +-- sentiment_features.py      # Sentiment aggregation
-|   |   +-- temporal_features.py       # Calendar/day-of-week features
+|   +-- features/
+|   |   +-- engine.py
+|   |   +-- store.py
+|   |   +-- macro_features.py
+|   |   +-- sentiment_features.py
+|   |   +-- temporal_features.py
 |   |
-|   +-- quant/                         # Quantitative alpha layer
-|   |   +-- factors.py                 # TSMOM, O-U mean reversion, Fama-French
-|   |   +-- statistical.py             # Kalman, HMM, GARCH, cointegration
-|   |   +-- risk.py                    # Kelly criterion, Ledoit-Wolf, PCA
-|   |   +-- signal_quality.py          # IC, Hurst exponent, wavelets
-|   |   +-- regime.py                  # HMM regime-aware weight routing
+|   +-- quant/
+|   |   +-- factors.py
+|   |   +-- statistical.py
+|   |   +-- risk.py
+|   |   +-- signal_quality.py
+|   |   +-- regime.py
 |   |
-|   +-- models/                        # ML model layer
-|   |   +-- types.py                   # Prediction dataclass, PredictionModel protocol
-|   |   +-- xgboost_model.py           # XGBoost with dual heads
-|   |   +-- lightgbm_model.py          # LightGBM with dual heads
-|   |   +-- lstm_model.py              # LSTM with dual heads (PyTorch)
-|   |   +-- transformer_model.py       # Transformer with dual heads (PyTorch)
-|   |   +-- ensemble.py                # Meta-learner stacking combiner
-|   |   +-- calibration.py             # Platt scaling confidence calibration
-|   |   +-- registry.py                # SQLite model version registry
+|   +-- models/
+|   |   +-- types.py
+|   |   +-- xgboost_model.py
+|   |   +-- lightgbm_model.py
+|   |   +-- lstm_model.py
+|   |   +-- transformer_model.py
+|   |   +-- ensemble.py
+|   |   +-- calibration.py
+|   |   +-- registry.py
 |   |
-|   +-- evaluation/                    # Backtesting and metrics
-|   |   +-- backtest.py                # Walk-forward backtesting engine
-|   |   +-- metrics.py                 # Prediction + trading quality metrics
-|   |   +-- tracker.py                 # Live accuracy tracking
+|   +-- evaluation/
+|   |   +-- backtest.py
+|   |   +-- metrics.py
+|   |   +-- tracker.py
 |   |
-|   +-- storage/                       # Persistence
-|       +-- database.py                # SQLite database (6 tables)
-|       +-- migrations.py              # Schema versioning
+|   +-- storage/
+|       +-- database.py
+|       +-- migrations.py
 |
-+-- rust/bist_features/                # Rust feature engine (PyO3)
++-- rust/bist_features/
+|   +-- Cargo.toml
 |   +-- src/
-|       +-- lib.rs                     # PyO3 module bindings
-|       +-- indicators.rs              # RSI, SMA, EMA, MACD, Bollinger, etc.
-|       +-- patterns.rs                # Candlestick pattern detection
-|       +-- correlations.rs            # Cross-stock correlation, beta
+|       +-- lib.rs
+|       +-- indicators.rs
+|       +-- patterns.rs
+|       +-- correlations.rs
 |
-+-- tests/                             # 173 tests
-|   +-- test_ingest/                   # 8 test files
-|   +-- test_features/                 # 8 test files (incl. 3 Rust indicator tests)
-|   +-- test_quant/                    # 5 test files
-|   +-- test_models/                   # 8 test files
-|   +-- test_evaluation/               # 3 test files
-|   +-- test_storage/                  # 1 test file
-|   +-- conftest.py                    # Shared fixtures (tmp_db_path, etc.)
-|
-+-- docs/superpowers/
-    +-- specs/                         # Design specification
-    +-- plans/                         # Implementation plans (4 plans)
++-- tests/
+    +-- test_ingest/
+    +-- test_features/
+    +-- test_quant/
+    +-- test_models/
+    +-- test_evaluation/
+    +-- test_storage/
+    +-- test_cli.py
+    +-- conftest.py
 ```
 
 ---
 
-## Testing
+## 14. Testing
 
 ```bash
 # Run all tests
@@ -549,56 +1078,77 @@ uv run pytest tests/test_storage/ -v       # Storage tests
 uv run pytest tests/test_models/test_xgboost_model.py::TestXGBoostModel::test_predict_better_than_random -v
 ```
 
-Test coverage by module:
+Current collection snapshot:
 
-| Module | Tests | What's covered |
-|--------|-------|---------------|
-| **ingest** | ~30 | HTTP mocking (respx), data validation, scheduler orchestration, all 4 data sources |
-| **features** | ~20 | Feature computation, store save/load, Rust indicators (via PyO3), macro/sentiment/temporal |
-| **quant** | ~25 | Kalman filter, O-U fitting, GARCH, HMM regime, Hurst, wavelets, IC, Kelly, cointegration |
-| **models** | ~35 | All 4 models (train/predict/save/load), ensemble combining, Platt calibration, registry CRUD |
-| **evaluation** | ~15 | Prediction metrics, trading metrics, walk-forward folds, live accuracy tracking |
-| **storage** | ~5 | Database init, schema, CRUD operations |
+```bash
+uv run pytest --collect-only -q
+```
+
+The command collected 221 tests in the current workspace. The test suite covers ingestion, feature stores, Rust indicators and patterns, quantitative alpha modules, model protocols, calibration, model registry behavior, backtesting folds, trading metrics, storage, and CLI helper logic.
+
+| Module | Coverage focus |
+|--------|----------------|
+| `tests/test_ingest/` | Price clients, macro client, sentiment feeds, validation, scheduler fallback, integration cycle. |
+| `tests/test_features/` | Feature engine, macro/sentiment/temporal features, store CRUD, Rust indicators, Rust correlations, Rust candlestick patterns. |
+| `tests/test_quant/` | Momentum, OU, Fama-French, Kalman, GARCH, HMM, cointegration, Hurst, wavelets, IC, Kelly, PCA, regime routing. |
+| `tests/test_models/` | XGBoost, LightGBM, LSTM, Transformer, ensemble, calibration, registry, dataset builders, prediction dataclass. |
+| `tests/test_evaluation/` | Walk-forward folds, transaction costs, prediction metrics, trading metrics, live accuracy tracking. |
+| `tests/test_storage/` | Database initialization, schema creation, stock universe seeding, raw price CRUD. |
 
 ---
 
-## Tech Stack
+## 15. Tech Stack and Data Sources
+
+### 15.1 Tech Stack
 
 | Component | Technology |
-|-----------|-----------|
-| **Language** | Python 3.12+, Rust |
-| **CLI** | Click |
-| **HTTP** | httpx (async) |
-| **Market data** | yfinance, custom Is Yatirim client |
-| **RSS** | feedparser |
-| **ML (trees)** | XGBoost, LightGBM |
-| **ML (deep)** | PyTorch (LSTM, Transformer) |
-| **Quant** | scipy, statsmodels, hmmlearn, arch (GARCH), PyWavelets |
-| **ML utilities** | scikit-learn (calibration, metrics, stacking) |
-| **Rust binding** | PyO3 + maturin |
-| **Storage** | SQLite |
-| **Build** | uv (Python), maturin (Rust) |
-| **Testing** | pytest, respx (HTTP mocking) |
+|-----------|------------|
+| Language | Python 3.12+, Rust |
+| CLI | Click |
+| HTTP | httpx |
+| Market data | yfinance, custom Is Yatirim client |
+| RSS | feedparser |
+| Tabular ML | XGBoost, LightGBM |
+| Neural ML | PyTorch LSTM and Transformer encoder |
+| Quant libraries | scipy, statsmodels, hmmlearn, arch, PyWavelets |
+| ML utilities | scikit-learn |
+| Rust binding | PyO3, maturin |
+| Storage | SQLite |
+| Build and environment | uv, Cargo |
+| Tests | pytest, pytest-asyncio, respx |
+
+### 15.2 Data Sources
+
+All data sources are free and require no paid subscription:
+
+| Source | Data | API key required |
+|--------|------|------------------|
+| [Is Yatirim](https://www.isyatirim.com.tr) | BIST OHLCV prices | No |
+| [Yahoo Finance](https://finance.yahoo.com) | BIST OHLCV prices fallback | No |
+| [TCMB EVDS](https://evds2.tcmb.gov.tr) | FX, rates, CPI, gold, bond indicators | Yes, free registration |
+| [Google News RSS](https://news.google.com) | Ticker-level headlines | No |
+| Turkish finance RSS feeds | Finance headline sentiment | No |
 
 ---
 
-## Data Sources
+## 16. Research Status and Limitations
 
-All data sources are free and require no paid subscriptions:
+This repository is an applied research system, not a production trading desk. Important implementation facts:
 
-| Source | Data | API Key Required |
-|--------|------|-----------------|
-| [Is Yatirim](https://www.isyatirim.com.tr) | BIST OHLCV prices (primary) | No |
-| [Yahoo Finance](https://finance.yahoo.com) | BIST OHLCV prices (fallback) | No |
-| [TCMB EVDS](https://evds2.tcmb.gov.tr) | Macro indicators (FX, rates, CPI, gold) | Yes (free registration) |
-| [Google News RSS](https://news.google.com) | Sentiment headlines per stock | No |
-| Turkish finance RSS | bloomberght, bigpara sentiment | No |
+- The model library contains four tested model classes, but the CLI training path currently activates XGBoost and LightGBM.
+- The ensemble combiner and Platt calibrator are implemented and tested; integrating them into the default CLI inference path is a natural next research milestone.
+- The Rust module exposes candlestick pattern detection, correlations, and beta; the current feature engine directly uses the indicator subset and price-derived features.
+- Walk-forward fold generation and transaction-cost logic are implemented and tested; full CLI-level backtest orchestration is marked as pending.
+- The system depends on free public data sources, so availability, schema stability, and latency can vary.
 
 ---
-## License
+
+## 17. License
 
 GNU General Public License v3.0
 
-## Disclaimer
+---
 
-This software is for educational and research purposes only. It is not financial advice. Past performance does not guarantee future results. Always do your own research before making investment decisions. The authors assume no liability for any losses incurred from using this system.
+## 18. Disclaimer
+
+This software is for educational and research purposes only. It is not financial advice. Past performance does not guarantee future results. Always do your own research before making investment decisions. The authors assume no liability for losses incurred from using this system.
