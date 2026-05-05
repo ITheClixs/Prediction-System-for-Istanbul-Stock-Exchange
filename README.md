@@ -1,6 +1,6 @@
 # BIST-Predict: A Hybrid Quantitative Machine Learning System for Daily BIST-100 Directional Forecasting
 
-**Abstract.** This repository implements a CLI-operated research system for daily Borsa Istanbul equity forecasting. Given a stock universe \( \mathcal{U} \), daily OHLCV observations, macroeconomic state variables, calendar variables, and news-derived sentiment, the system constructs a multi-modal feature tensor and estimates next-session directional probability \(P(y_{i,t+1}=1 \mid \mathbf{x}_{i,t})\) together with a conditional percentage-return forecast \( \hat{r}_{i,t+1} \). The implementation combines free market-data ingestion, a Rust/PyO3 technical-indicator engine, Python quantitative alpha modules, tabular gradient-boosted learners, sequential neural models, stacking, probability calibration, SQLite-backed model governance, walk-forward evaluation, and live accuracy tracking. The practical objective is not a single black-box classifier; it is an auditable research pipeline in which each transformation from raw market state to signal tier is represented as a typed, testable module.
+**Abstract.** This repository implements a CLI-operated research system for daily Borsa Istanbul equity forecasting. Given a stock universe $\mathcal{U}$, daily OHLCV observations, macroeconomic state variables, calendar variables, and news-derived sentiment, the system constructs a multi-modal feature tensor and estimates next-session directional probability $P(y_{i,t+1}=1 \mid \mathbf{x}_{i,t})$ together with a conditional percentage-return forecast $\hat{r}_{i,t+1}$. The implementation combines free market-data ingestion, a Rust/PyO3 technical-indicator engine, Python quantitative alpha modules, tabular gradient-boosted learners, sequential neural models, stacking, probability calibration, SQLite-backed model governance, walk-forward evaluation, and live accuracy tracking. The practical objective is not a single black-box classifier; it is an auditable research pipeline in which each transformation from raw market state to signal tier is represented as a typed, testable module.
 
 **Keywords:** BIST-100, directional forecasting, XGBoost, LightGBM, LSTM, Transformer encoder, Platt calibration, Ornstein-Uhlenbeck process, GARCH(1,1), Hidden Markov Models, Kalman filtering, feature stores, walk-forward backtesting.
 
@@ -31,7 +31,7 @@
 
 ## 1. Research Problem
 
-For stock \(i \in \mathcal{U}\) and trading date \(t\), let the observed state be
+For stock $i \in \mathcal{U}$ and trading date $t$, let the observed state be
 
 $$
 \mathbf{s}_{i,t} =
@@ -41,7 +41,7 @@ O_{i,t}, H_{i,t}, L_{i,t}, C_{i,t}, V_{i,t},
 \right],
 $$
 
-where \(O,H,L,C,V\) are open, high, low, close, and volume; \(\mathbf{m}_t\) denotes macro variables from TCMB; \(\mathbf{q}_{i,t}\) denotes ticker-level sentiment; and \(\mathbf{c}_t\) denotes calendar state.
+where $O,H,L,C,V$ are open, high, low, close, and volume; $\mathbf{m}_t$ denotes macro variables from TCMB; $\mathbf{q}_{i,t}$ denotes ticker-level sentiment; and $\mathbf{c}_t$ denotes calendar state.
 
 The supervised labels are next-observation direction and return:
 
@@ -62,7 +62,7 @@ f_\theta(\mathbf{x}_{i,t}) =
 \hat{p}_{i,t+1} \approx P(y_{i,t+1}=1 \mid \mathbf{x}_{i,t}).
 $$
 
-The feature vector \(\mathbf{x}_{i,t}\) is a deterministic transformation of historical prices, macro data, sentiment, and temporal encodings. The project is therefore a complete applied ML research stack: data generation, feature computation, model training, model registry, signal inference, and evaluation.
+The feature vector $\mathbf{x}_{i,t}$ is a deterministic transformation of historical prices, macro data, sentiment, and temporal encodings. The project is therefore a complete applied ML research stack: data generation, feature computation, model training, model registry, signal inference, and evaluation.
 
 ---
 
@@ -119,7 +119,7 @@ The implementation uses a layered design:
 
 ## 3. Data and Storage Model
 
-The data model is explicitly time-indexed. This matters because the learning task is leakage-sensitive: features at \(t\) must never include outcomes from \(t+1\).
+The data model is explicitly time-indexed. This matters because the learning task is leakage-sensitive: features at $t$ must never include outcomes from $t+1$.
 
 ```mermaid
 erDiagram
@@ -206,7 +206,7 @@ Invalid observations are filtered before storage so that downstream feature func
 
 ## 4. Feature Construction
 
-The feature engine computes \(\mathbf{x}_{i,t}\) from at most 252 historical price observations ending at \(t\). The resulting vector combines Rust-computed technical features, Python-computed macro/sentiment/calendar features, and quantitative alpha features.
+The feature engine computes $\mathbf{x}_{i,t}$ from at most 252 historical price observations ending at $t$. The resulting vector combines Rust-computed technical features, Python-computed macro/sentiment/calendar features, and quantitative alpha features.
 
 ```mermaid
 flowchart LR
@@ -277,7 +277,7 @@ $$
 \delta m_{j,t} = \frac{m_{j,t} - m_{j,t^-}}{m_{j,t^-}},
 $$
 
-where \(t^-\) is the previous available observation date for indicator \(j\). Implemented indicator keys are:
+where $t^-$ is the previous available observation date for indicator $j$. Implemented indicator keys are:
 
 | Indicator | Feature names |
 |-----------|---------------|
@@ -290,7 +290,7 @@ where \(t^-\) is the previous available observation date for indicator \(j\). Im
 
 ### 4.3 Sentiment Features
 
-For a ticker \(i\), date \(t\), and sentiment scores \(a_{i,t,k}\), the system computes:
+For a ticker $i$, date $t$, and sentiment scores $a_{i,t,k}$, the system computes:
 
 $$
 \bar{a}_{i,t} = \frac{1}{K_{i,t}}\sum_{k=1}^{K_{i,t}}a_{i,t,k},
@@ -323,23 +323,24 @@ The quantitative layer is not treated as side metadata. It formalizes alternativ
 `quant/statistical.py` implements a two-dimensional state-space model:
 
 $$
-\mathbf{z}_t =
+\begin{aligned}
+\mathbf{z}_t &=
 \begin{bmatrix}
 \ell_t \\
 v_t
-\end{bmatrix},
-\qquad
-\mathbf{z}_t =
-\underbrace{
+\end{bmatrix}, &
+\mathbf{F} &=
 \begin{bmatrix}
 1 & 1 \\
 0 & 1
-\end{bmatrix}}_{\mathbf{F}}
-\mathbf{z}_{t-1} + \mathbf{w}_t,
-\qquad
-C_t =
-\underbrace{\begin{bmatrix}1 & 0\end{bmatrix}}_{\mathbf{H}}
-\mathbf{z}_t + \epsilon_t.
+\end{bmatrix}, &
+\mathbf{H} &=
+\begin{bmatrix}
+1 & 0
+\end{bmatrix}, \\
+\mathbf{z}_t &= \mathbf{F}\mathbf{z}_{t-1} + \mathbf{w}_t, &
+C_t &= \mathbf{H}\mathbf{z}_t + \epsilon_t.
+\end{aligned}
 $$
 
 Prediction and update:
@@ -355,9 +356,11 @@ $$
 $$
 
 $$
-\hat{\mathbf{z}}_{t|t} =
-\hat{\mathbf{z}}_{t|t-1}
-+ \mathbf{K}_t(C_t-\mathbf{H}\hat{\mathbf{z}}_{t|t-1}).
+\begin{aligned}
+\hat{\mathbf{z}}_{t|t}
+&= \hat{\mathbf{z}}_{t|t-1}
++ \mathbf{K}_t\left(C_t-\mathbf{H}\hat{\mathbf{z}}_{t|t-1}\right).
+\end{aligned}
 $$
 
 Exported features: `kalman_trend`, `kalman_velocity`, `kalman_variance`.
@@ -415,7 +418,7 @@ $$
 \mathbf{o}_t = [r_t, r_t^2],
 $$
 
-with latent regime \(z_t \in \{1,\dots,K\}\), transition matrix \(A\), and Gaussian emissions:
+with latent regime $z_t \in \{1,\dots,K\}$, transition matrix $A$, and Gaussian emissions:
 
 $$
 P(z_t=j \mid z_{t-1}=i) = A_{ij},
@@ -423,7 +426,7 @@ P(z_t=j \mid z_{t-1}=i) = A_{ij},
 \mathbf{o}_t \mid z_t=k \sim \mathcal{N}(\boldsymbol{\mu}_k,\boldsymbol{\Sigma}_k).
 $$
 
-For \(K=3\), states are labeled by mean return: lowest mean as bear, highest mean as bull, and the middle state as sideways. Exported values include current state and posterior bull/bear/sideways probabilities.
+For $K=3$, states are labeled by mean return: lowest mean as bear, highest mean as bull, and the middle state as sideways. Exported values include current state and posterior bull/bear/sideways probabilities.
 
 ```mermaid
 stateDiagram-v2
@@ -456,13 +459,19 @@ $$
 Cross-sectional momentum ranks trailing cumulative returns into percentile scores. The adapted Fama-French module computes:
 
 $$
-SMB_t = \frac{1}{|\mathcal{S}|}\sum_{i \in \mathcal{S}}r_{i,t}
-- \frac{1}{|\mathcal{B}|}\sum_{i \in \mathcal{B}}r_{i,t},
+\begin{aligned}
+SMB_t &=
+\frac{1}{|\mathcal{S}|}\sum_{i \in \mathcal{S}} r_{i,t}
+- \frac{1}{|\mathcal{B}|}\sum_{i \in \mathcal{B}} r_{i,t}.
+\end{aligned}
 $$
 
 $$
-HML_t = \frac{1}{|\mathcal{H}|}\sum_{i \in \mathcal{H}}r_{i,t}
-- \frac{1}{|\mathcal{L}|}\sum_{i \in \mathcal{L}}r_{i,t},
+\begin{aligned}
+HML_t &=
+\frac{1}{|\mathcal{H}|}\sum_{i \in \mathcal{H}} r_{i,t}
+- \frac{1}{|\mathcal{L}|}\sum_{i \in \mathcal{L}} r_{i,t}.
+\end{aligned}
 $$
 
 then estimates stock exposures by OLS:
@@ -486,7 +495,7 @@ f^* = \frac{pb - q}{b},
 \qquad q = 1-p,
 $$
 
-with fractional sizing \(f = \lambda f^*\), where the default implementation uses conservative fractional Kelly.
+with fractional sizing $f = \lambda f^*$, where the default implementation uses conservative fractional Kelly.
 
 Ledoit-Wolf shrinkage estimates covariance as:
 
@@ -494,7 +503,7 @@ $$
 \hat{\Sigma}_{LW} = \lambda \mathbf{T} + (1-\lambda)\mathbf{S},
 $$
 
-where \(\mathbf{S}\) is the empirical covariance matrix and \(\mathbf{T}\) is a structured shrinkage target.
+where $\mathbf{S}$ is the empirical covariance matrix and $\mathbf{T}$ is a structured shrinkage target.
 
 PCA factor extraction solves:
 
@@ -512,9 +521,10 @@ subject to orthogonality constraints for later components.
 The repository defines a shared `PredictionModel` protocol. Every model returns:
 
 $$
+\begin{aligned}
 \left(\hat{p}_{i,t+1}, \hat{r}_{i,t+1}\right)
-=
-\texttt{model.predict}(\mathbf{x}_{i,t}).
+&= \mathrm{model.predict}\left(\mathbf{x}_{i,t}\right).
+\end{aligned}
 $$
 
 ### 6.1 Dataset Construction
@@ -555,17 +565,19 @@ $$
 The tree and neural models optimize separate direction and return heads. For neural models, the combined loss is:
 
 $$
-\mathcal{L}(\theta)
-=
-\underbrace{
+\begin{aligned}
+\mathcal{L}_{BCE}(\theta)
+&=
 -\frac{1}{N}\sum_{n=1}^{N}
 \left[
 y_n\log \hat{p}_n + (1-y_n)\log(1-\hat{p}_n)
-\right]}_{\text{binary cross entropy}}
-+
-\underbrace{
-\frac{1}{N}\sum_{n=1}^{N}
-(\hat{r}_n-r_n)^2}_{\text{return regression MSE}}.
+\right], \\
+\mathcal{L}_{MSE}(\theta)
+&=
+\frac{1}{N}\sum_{n=1}^{N}(\hat{r}_n-r_n)^2, \\
+\mathcal{L}(\theta)
+&= \mathcal{L}_{BCE}(\theta) + \mathcal{L}_{MSE}(\theta).
+\end{aligned}
 $$
 
 For XGBoost and LightGBM, the classifier and regressor heads are fitted as independent estimators over the same feature matrix.
@@ -574,10 +586,10 @@ For XGBoost and LightGBM, the classifier and regressor heads are fitted as indep
 
 | Model | Module | Input | Output heads | Current operational status |
 |-------|--------|-------|--------------|----------------------------|
-| XGBoost | `models/xgboost_model.py` | Tabular \(N \times d\) | classifier + regressor | Trained by CLI. |
-| LightGBM | `models/lightgbm_model.py` | Tabular \(N \times d\) | classifier + regressor | Trained by CLI. |
-| LSTM | `models/lstm_model.py` | Sequence \(N \times L \times d\) | sigmoid direction + linear return | Implemented, tested, protocol-compatible. |
-| Transformer | `models/transformer_model.py` | Sequence \(N \times L \times d\) | sigmoid direction + linear return | Implemented, tested, protocol-compatible. |
+| XGBoost | `models/xgboost_model.py` | Tabular $N \times d$ | classifier + regressor | Trained by CLI. |
+| LightGBM | `models/lightgbm_model.py` | Tabular $N \times d$ | classifier + regressor | Trained by CLI. |
+| LSTM | `models/lstm_model.py` | Sequence $N \times L \times d$ | sigmoid direction + linear return | Implemented, tested, protocol-compatible. |
+| Transformer | `models/transformer_model.py` | Sequence $N \times L \times d$ | sigmoid direction + linear return | Implemented, tested, protocol-compatible. |
 
 ### 6.4 LSTM Representation
 
@@ -604,14 +616,14 @@ $$
 
 ### 6.5 Transformer Representation
 
-The Transformer encoder first projects feature vectors into \(d_{model}\), adds sinusoidal positional encodings, then applies multi-head self-attention:
+The Transformer encoder first projects feature vectors into $d_{model}$, adds sinusoidal positional encodings, then applies multi-head self-attention:
 
 $$
 \text{Attention}(Q,K,V) =
 \text{softmax}\left(\frac{QK^\top}{\sqrt{d_k}}\right)V.
 $$
 
-For head \(h\):
+For head $h$:
 
 $$
 \text{head}_h =
@@ -672,11 +684,11 @@ P(y=1 \mid a) =
 \frac{1}{1+\exp(Aa+B)},
 $$
 
-where \(a\) is an uncalibrated score or raw probability transformed as a scalar input. This turns confidence into an empirical probability statement.
+where $a$ is an uncalibrated score or raw probability transformed as a scalar input. This turns confidence into an empirical probability statement.
 
 ### 7.2 Signal Tier Function
 
-For direction \(d\) and confidence \(c\), the signal-tier function is:
+For direction $d$ and confidence $c$, the signal-tier function is:
 
 $$
 \tau(d,c) =
@@ -707,7 +719,7 @@ $$
 \{t_k+W_{train},\dots,t_k+W_{train}+W_{val}-1\}.
 $$
 
-With defaults \(W_{train}=252\), \(W_{val}=63\), and step size \(21\), each validation block is strictly later than its training block.
+With defaults $W_{train}=252$, $W_{val}=63$, and step size $21$, each validation block is strictly later than its training block.
 
 ```mermaid
 gantt
@@ -760,7 +772,7 @@ The AUC-ROC is computed where class diversity permits it.
 
 ### 8.3 Trading Metrics
 
-For daily strategy returns \(R_t\):
+For daily strategy returns $R_t$:
 
 $$
 \text{Sharpe} =
@@ -773,11 +785,16 @@ $$
 $$
 
 $$
-\text{MaxDrawdown} =
+\begin{aligned}
+\text{MaxDrawdown} &=
 \min_t
-\frac{\prod_{\tau \leq t}(1+R_\tau)
-- \max_{u \leq t}\prod_{\tau \leq u}(1+R_\tau)}
-{\max_{u \leq t}\prod_{\tau \leq u}(1+R_\tau)}.
+\frac{
+\prod_{\tau \leq t}(1+R_\tau)
+- \max_{u \leq t}\prod_{\tau \leq u}(1+R_\tau)
+}{
+\max_{u \leq t}\prod_{\tau \leq u}(1+R_\tau)
+}.
+\end{aligned}
 $$
 
 Additional tracked metrics include win rate, profit factor, average win/loss ratio, Calmar ratio, and total return.
