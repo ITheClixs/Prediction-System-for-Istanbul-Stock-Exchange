@@ -488,6 +488,40 @@ $$
 IC_t = \rho_{Spearman}(\hat{r}_{:,t}, r_{:,t}).
 $$
 
+For a cross-section at evaluation date $t$, the rank-based statistic is computed as:
+
+$$
+\begin{aligned}
+IC_t
+&=
+\frac{
+\sum_{i=1}^{N_t}
+\left(\operatorname{rank}(\hat{r}_{i,t})-\bar{R}_{\hat{r},t}\right)
+\left(\operatorname{rank}(r_{i,t})-\bar{R}_{r,t}\right)
+}{
+\sqrt{
+\sum_{i=1}^{N_t}
+\left(\operatorname{rank}(\hat{r}_{i,t})-\bar{R}_{\hat{r},t}\right)^2
+}
+\sqrt{
+\sum_{i=1}^{N_t}
+\left(\operatorname{rank}(r_{i,t})-\bar{R}_{r,t}\right)^2
+}
+}.
+\end{aligned}
+$$
+
+Thus $IC_t>0$ means that the model's ranking agrees with realized return ordering, while $IC_t<0$ indicates inverse ranking information. The corresponding information ratio over $T$ validation dates is:
+
+$$
+IR =
+\frac{
+\frac{1}{T}\sum_{t=1}^{T} IC_t
+}{
+\sqrt{\frac{1}{T-1}\sum_{t=1}^{T}(IC_t-\bar{IC})^2}
+}.
+$$
+
 Kelly fraction:
 
 $$
@@ -496,6 +530,22 @@ f^* = \frac{pb - q}{b},
 $$
 
 with fractional sizing $f = \lambda f^*$, where the default implementation uses conservative fractional Kelly.
+
+For a calibrated directional model, the empirical win probability and payoff ratio can be estimated on a validation block $\mathcal{V}$:
+
+$$
+\hat{p}_{\mathcal{V}} =
+\frac{1}{|\mathcal{V}|}
+\sum_{(i,t)\in\mathcal{V}}
+\mathbb{1}\{\operatorname{sign}(\hat{r}_{i,t})=\operatorname{sign}(r_{i,t})\},
+\qquad
+\hat{b}_{\mathcal{V}} =
+\frac{
+\mathbb{E}[|r_{i,t}| \mid \operatorname{sign}(\hat{r}_{i,t})=\operatorname{sign}(r_{i,t})]
+}{
+\mathbb{E}[|r_{i,t}| \mid \operatorname{sign}(\hat{r}_{i,t})\neq\operatorname{sign}(r_{i,t})]
+}.
+$$
 
 Ledoit-Wolf shrinkage estimates covariance as:
 
@@ -560,6 +610,23 @@ $$
 \in \mathbb{R}^{L \times d}.
 $$
 
+The keyed dataset variant used by the ensemble workflow attaches each row to:
+
+$$
+k_n = (i_n,t_n),
+$$
+
+so base-model validation predictions can be intersected exactly before stacking:
+
+$$
+\mathcal{K}^{meta}
+=
+\bigcap_{m=1}^{M}
+\left\{k_n : \hat{p}^{(m)}_n \text{ is available}\right\}.
+$$
+
+This prevents a meta-learner from combining predictions that refer to different tickers or dates.
+
 ### 6.2 Dual-Head Objective
 
 The tree and neural models optimize separate direction and return heads. For neural models, the combined loss is:
@@ -582,14 +649,40 @@ $$
 
 For XGBoost and LightGBM, the classifier and regressor heads are fitted as independent estimators over the same feature matrix.
 
+In all cases the supervised target is:
+
+$$
+r_{i,t+1} = \frac{C_{i,t+1}-C_{i,t}}{C_{i,t}},
+\qquad
+y_{i,t+1}=\mathbb{1}\{r_{i,t+1}>0\}.
+$$
+
+The empirical risk minimized by a dual-head learner can be written abstractly as:
+
+$$
+\hat{\theta}
+=
+\arg\min_{\theta}
+\frac{1}{N}
+\sum_{n=1}^{N}
+\left[
+\ell_{cls}\left(y_n,\hat{p}_{\theta}(\mathbf{x}_n)\right)
++
+\gamma
+\ell_{ret}\left(r_n,\hat{r}_{\theta}(\mathbf{x}_n)\right)
+\right],
+$$
+
+where the implemented neural objective uses $\gamma=1$, binary cross-entropy for $\ell_{cls}$, and squared error for $\ell_{ret}$.
+
 ### 6.3 Model Library
 
 | Model | Module | Input | Output heads | Current operational status |
 |-------|--------|-------|--------------|----------------------------|
-| XGBoost | `models/xgboost_model.py` | Tabular $N \times d$ | classifier + regressor | Trained by CLI. |
-| LightGBM | `models/lightgbm_model.py` | Tabular $N \times d$ | classifier + regressor | Trained by CLI. |
-| LSTM | `models/lstm_model.py` | Sequence $N \times L \times d$ | sigmoid direction + linear return | Implemented, tested, protocol-compatible. |
-| Transformer | `models/transformer_model.py` | Sequence $N \times L \times d$ | sigmoid direction + linear return | Implemented, tested, protocol-compatible. |
+| XGBoost | `models/xgboost_model.py` | Tabular $N \times d$ | classifier + regressor | Default base model. |
+| LightGBM | `models/lightgbm_model.py` | Tabular $N \times d$ | classifier + regressor | Default base model. |
+| LSTM | `models/lstm_model.py` | Sequence $N \times L \times d$ | sigmoid direction + linear return | Opt-in neural base model. |
+| Transformer | `models/transformer_model.py` | Sequence $N \times L \times d$ | sigmoid direction + linear return | Opt-in neural base model. |
 
 ### 6.4 LSTM Representation
 
@@ -651,6 +744,26 @@ $$
 \right].
 $$
 
+The meta-training set is deliberately constructed from validation predictions rather than in-sample base-model predictions. Let $\mathcal{T}$ be the base-model training interval and $\mathcal{M}$ be a later meta interval with $\max \mathcal{T}<\min \mathcal{M}$. For each base learner $m$:
+
+$$
+\hat{f}^{(m)} =
+\operatorname{fit}\left(\{(\mathbf{x}_{i,t},y_{i,t+1},r_{i,t+1}) : t\in\mathcal{T}\}\right),
+$$
+
+and the stacker receives:
+
+$$
+\mathbf{z}_{i,t}
+=
+\left[
+\hat{f}^{(1)}(\mathbf{x}_{i,t}),
+\dots,
+\hat{f}^{(M)}(\mathbf{x}_{i,t})
+\right],
+\qquad t\in\mathcal{M}.
+$$
+
 Direction stacking uses logistic regression:
 
 $$
@@ -671,6 +784,21 @@ $$
 
 If the meta-learner is not trained, predictions fall back to simple averaging.
 
+Operationally, active ensemble inference computes:
+
+$$
+\hat{p}^{final}_{i,t+1}
+=
+\operatorname{Calibrate}
+\left(
+\hat{p}^{ens}_{i,t+1}
+\right),
+\qquad
+\hat{r}^{final}_{i,t+1}
+=
+\hat{r}^{ens}_{i,t+1}.
+$$
+
 ---
 
 ## 7. Calibration, Signal Tiers, and Decision Rule
@@ -685,6 +813,27 @@ P(y=1 \mid a) =
 $$
 
 where $a$ is an uncalibrated score or raw probability transformed as a scalar input. This turns confidence into an empirical probability statement.
+
+The fitted coefficients minimize the negative log-likelihood on the calibration set:
+
+$$
+\begin{aligned}
+\mathcal{L}_{cal}(A,B)
+&=
+-
+\sum_{n=1}^{N_{cal}}
+\left[
+y_n \log q_n
++
+(1-y_n)\log(1-q_n)
+\right], \\
+q_n
+&=
+\frac{1}{1+\exp(Aa_n+B)}.
+\end{aligned}
+$$
+
+If the calibration block contains only one class, the implementation records the calibration state as skipped and leaves ensemble probabilities untransformed. This avoids fitting an unidentified sigmoid.
 
 ### 7.2 Signal Tier Function
 
@@ -701,7 +850,7 @@ $$
 \end{cases}
 $$
 
-The inference path currently loads active XGBoost and LightGBM models from the model registry. If a model expects a different feature dimension than the latest feature row, that ticker/model pair is skipped to prevent schema-incompatible inference.
+The inference path first tries to load the active calibrated ensemble from the model registry. It then loads the ensemble's active base models, aligns tabular or sequence inference rows by the recorded feature dimension, and emits a single ensemble prediction per ticker. If no active ensemble is available, it falls back to active tabular base models. If a model expects a different feature dimension than the latest feature row, that ticker/model pair is skipped to prevent schema-incompatible inference.
 
 ---
 
@@ -720,6 +869,36 @@ $$
 $$
 
 With defaults $W_{train}=252$, $W_{val}=63$, and step size $21$, each validation block is strictly later than its training block.
+
+For calibrated stacking, each training fold is internally partitioned into a base-training segment and a meta-calibration segment:
+
+$$
+\begin{aligned}
+\mathcal{D}^{base}_k
+&=
+\{t_k,\dots,t_k+W_{base}-1\}, \\
+\mathcal{D}^{meta}_k
+&=
+\{t_k+W_{base},\dots,t_k+W_{train}-1\}, \\
+\mathcal{D}^{val}_k
+&=
+\{t_k+W_{train},\dots,t_k+W_{train}+W_{val}-1\}.
+\end{aligned}
+$$
+
+The temporal ordering condition is therefore:
+
+$$
+\max \mathcal{D}^{base}_k
+<
+\min \mathcal{D}^{meta}_k
+\leq
+\max \mathcal{D}^{meta}_k
+<
+\min \mathcal{D}^{val}_k.
+$$
+
+This gives the base learners, stacker, calibrator, and final validation block disjoint chronological roles inside each fold.
 
 ```mermaid
 gantt
@@ -741,6 +920,30 @@ Trading costs are applied on entry and exit:
 
 $$
 r^{net} = r^{gross} - 2c_{commission} - 2c_{slippage}.
+$$
+
+The paper-trading position rule induced by calibrated probability $\tilde{p}_{i,t+1}$ and threshold $\eta$ is:
+
+$$
+w_{i,t+1} =
+\begin{cases}
++1, & \tilde{p}_{i,t+1} \geq \eta,\\
+-1, & \tilde{p}_{i,t+1} \leq 1-\eta,\\
+0, & 1-\eta < \tilde{p}_{i,t+1} < \eta.
+\end{cases}
+$$
+
+For a validation date with active position set $\mathcal{A}_t=\{i: w_{i,t}\neq 0\}$, equal-weighted portfolio return is:
+
+$$
+R_t =
+\begin{cases}
+\frac{1}{|\mathcal{A}_t|}
+\sum_{i\in\mathcal{A}_t}
+\left(w_{i,t}r_{i,t}^{gross}-2c_{commission}-2c_{slippage}\right),
+& |\mathcal{A}_t|>0,\\
+0, & |\mathcal{A}_t|=0.
+\end{cases}
 $$
 
 ### 8.2 Prediction Metrics
