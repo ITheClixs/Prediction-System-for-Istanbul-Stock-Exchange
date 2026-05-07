@@ -12,6 +12,8 @@ import torch.nn as nn
 from numpy.typing import NDArray
 from torch.utils.data import DataLoader, TensorDataset
 
+torch.set_num_threads(1)
+
 
 class _PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_len: int = 500) -> None:

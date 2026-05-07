@@ -33,6 +33,10 @@ class SignalsConfig:
 class ModelsConfig:
     retrain_interval: str = "monthly"
     ensemble_weights: str = "learned"
+    active_models: str = "xgboost,lightgbm"
+    include_neural: bool = False
+    seq_len: int = 30
+    validation_fraction: float = 0.2
 
 
 @dataclass(frozen=True)

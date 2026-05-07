@@ -10,6 +10,10 @@ lookback_days = 30
 [models]
 retrain_interval = "monthly"
 ensemble_weights = "learned"
+active_models = "xgboost,lightgbm"
+include_neural = false
+seq_len = 30
+validation_fraction = 0.2
 
 [quant]
 hmm_states = 3

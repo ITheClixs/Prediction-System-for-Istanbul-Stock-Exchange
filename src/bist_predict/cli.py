@@ -228,90 +228,74 @@ def config() -> None:
     click.echo(f"  Fetch retries: {cfg.data.fetch_retries}")
     click.echo(f"  Rate limit delay: {cfg.data.rate_limit_delay}s")
     click.echo(f"  Min confidence: {cfg.signals.min_confidence}")
+    click.echo(f"  Active models: {cfg.models.active_models}")
+    click.echo(f"  Include neural: {cfg.models.include_neural}")
+    click.echo(f"  Sequence length: {cfg.models.seq_len}")
+    click.echo(f"  Validation fraction: {cfg.models.validation_fraction}")
     click.echo(f"  Backtest commission: {cfg.backtest.commission}")
     click.echo(f"  Backtest slippage: {cfg.backtest.slippage}")
 
 
 @main.command()
 @click.option("--ticker", default=None, help="Train for a single ticker")
-def train(ticker: str | None) -> None:
+@click.option("--models", "model_names", default=None, help="Comma-separated base models")
+@click.option("--include-neural", is_flag=True, help="Also train LSTM and Transformer")
+@click.option("--seq-len", default=None, type=int, help="Sequence length for neural models")
+def train(
+    ticker: str | None,
+    model_names: str | None,
+    include_neural: bool,
+    seq_len: int | None,
+) -> None:
     """Train or retrain prediction models."""
-    _train_models(ticker)
+    _train_models(ticker, model_names, include_neural, seq_len)
 
 
-def _train_models(ticker: str | None) -> None:
+def _train_models(
+    ticker: str | None,
+    model_names: str | None = None,
+    include_neural: bool = False,
+    seq_len: int | None = None,
+) -> None:
     """Train and activate models for the selected tickers."""
-    import numpy as np
-
-    from bist_predict.models.xgboost_model import XGBoostModel
-    from bist_predict.models.lightgbm_model import LightGBMModel
-    from bist_predict.models.registry import ModelRegistry
-    from bist_predict.models.types import build_tabular_dataset
+    from bist_predict.models.factory import parse_model_names
+    from bist_predict.research.ensemble_pipeline import (
+        EnsembleTrainConfig,
+        train_calibrated_ensemble,
+    )
 
     config = load_config()
     db = Database(config.db_path)
     db.initialize()
-    registry = ModelRegistry(db)
-
     tickers = _resolve_tickers(db, ticker)
-    all_X, all_y_dir, all_y_pct = [], [], []
 
-    for t in tickers:
-        X, y_dir, y_pct, _ = build_tabular_dataset(db, t)
-        if X.shape[0] > 0:
-            all_X.append(X)
-            all_y_dir.append(y_dir)
-            all_y_pct.append(y_pct)
-            click.echo(f"  {t}: {X.shape[0]} samples, {X.shape[1]} features")
+    selected_models = parse_model_names(model_names or config.models.active_models)
+    neural_enabled = include_neural or config.models.include_neural
+    training_config = EnsembleTrainConfig(
+        model_names=selected_models,
+        include_neural=neural_enabled,
+        seq_len=seq_len or config.models.seq_len,
+        validation_fraction=config.models.validation_fraction,
+        min_confidence=config.signals.min_confidence,
+    )
 
-    if not all_X:
-        click.echo("No training data available. Run 'fetch' and 'features' first.")
+    click.echo(f"Training calibrated ensemble with: {', '.join(selected_models)}")
+    if neural_enabled:
+        click.echo(f"  Neural models enabled with seq_len={training_config.seq_len}")
+
+    try:
+        report = train_calibrated_ensemble(db, training_config, tickers=tickers)
+    except ValueError as e:
+        click.echo(f"No ensemble trained: {e}")
+        click.echo("Run 'fetch' and 'features' first, or reduce the validation/data requirements.")
         return
 
-    # Use the most common feature count to keep a consistent schema
-    from collections import Counter
-    col_counts = Counter(x.shape[1] for x in all_X)
-    target_cols = col_counts.most_common(1)[0][0]
-
-    filtered_X, filtered_dir, filtered_pct = [], [], []
-    skipped = 0
-    for x, yd, yp in zip(all_X, all_y_dir, all_y_pct):
-        if x.shape[1] == target_cols:
-            filtered_X.append(x)
-            filtered_dir.append(yd)
-            filtered_pct.append(yp)
-        else:
-            skipped += 1
-
-    if skipped:
-        click.echo(f"  Skipped {skipped} ticker(s) with mismatched feature count")
-
-    X = np.vstack(filtered_X)
-    y_dir = np.concatenate(filtered_dir)
-    y_pct = np.concatenate(filtered_pct)
-
-    split = int(len(X) * 0.8)
-    X_train, X_val = X[:split], X[split:]
-    y_dir_train, y_dir_val = y_dir[:split], y_dir[split:]
-    y_pct_train, y_pct_val = y_pct[:split], y_pct[split:]
-
-    click.echo(f"\nTraining on {split} samples, validating on {len(X) - split}...")
-
-    for ModelClass in [XGBoostModel, LightGBMModel]:
-        model = ModelClass()
-        click.echo(f"\n  Training {model.name}...")
-        metrics = model.train(X_train, y_dir_train, y_pct_train, X_val, y_dir_val, y_pct_val)
-        click.echo(f"    Accuracy: {metrics.get('val_accuracy', 0):.3f}")
-        click.echo(f"    MAE: {metrics.get('val_mae', 0):.5f}")
-
-        version = date.today().isoformat()
-        model_path = str(config.db_path.parent / "models" / model.name / version)
-        model.save(model_path)
-        registry.register(model.name, version, model_path, metrics)
-        registry.activate(model.name, version)
-        click.echo(f"    Saved and activated: {model.name} {version}")
-
-    click.echo("\nTraining complete.")
+    click.echo(f"\nTraining complete: ensemble {report.version}")
+    click.echo(f"  Base models: {', '.join(report.base_models)}")
+    click.echo(f"  Validation samples: {report.validation_samples}")
+    click.echo(f"  Calibration: {report.calibration_status}")
+    click.echo(f"  Accuracy: {report.metrics.get('accuracy', 0):.3f}")
+    click.echo(f"  MAE: {report.metrics.get('mae', 0):.5f}")
 
 
 @main.command()
@@ -324,10 +308,18 @@ def signals(ticker: str | None, detail: bool) -> None:
 
 def _generate_signals(ticker: str | None, detail: bool) -> None:
     """Load active models and emit predictions."""
-    from bist_predict.models.xgboost_model import XGBoostModel
-    from bist_predict.models.lightgbm_model import LightGBMModel
+    import json
+
+    from bist_predict.models.calibration import PlattCalibrator
+    from bist_predict.models.ensemble import EnsembleCombiner
+    from bist_predict.models.factory import create_model, parse_model_names
     from bist_predict.models.registry import ModelRegistry
-    from bist_predict.models.types import Prediction, build_inference_row
+    from bist_predict.models.types import (
+        Prediction,
+        build_inference_row,
+        build_sequence_inference_row,
+    )
+    from bist_predict.research.ensemble_pipeline import SEQUENCE_MODELS
 
     config = load_config()
     db = Database(config.db_path)
@@ -337,31 +329,94 @@ def _generate_signals(ticker: str | None, detail: bool) -> None:
     tickers = _resolve_tickers(db, ticker)
     predictions: list[Prediction] = []
 
-    for ModelClass in [XGBoostModel, LightGBMModel]:
-        model = ModelClass()
-        active = registry.get_active(model.name)
-        if active is None:
-            click.echo(f"  No active {model.name} model. Run 'train' first.")
-            continue
-        model.load(active["model_path"])
+    active_ensemble = registry.get_active("ensemble")
+    if active_ensemble is not None:
+        try:
+            ensemble_path = active_ensemble["model_path"]
+            with open(f"{ensemble_path}/ensemble_metadata.json") as f:
+                metadata = json.load(f)
+            combiner = EnsembleCombiner()
+            combiner.load(ensemble_path)
+            calibrator = PlattCalibrator()
+            calibrator.load(ensemble_path)
+            base_models = metadata.get(
+                "base_models", parse_model_names(config.models.active_models),
+            )
+            seq_len = int(metadata.get("seq_len", config.models.seq_len))
 
-        expected_features = model.n_features
+            for t in tickers:
+                model_predictions = {}
+                for model_name in base_models:
+                    active = registry.get_active(model_name)
+                    if active is None:
+                        continue
+                    model = create_model(model_name)
+                    model.load(active["model_path"])
+                    if model_name in SEQUENCE_MODELS:
+                        inference = build_sequence_inference_row(db, t, seq_len=seq_len)
+                    else:
+                        inference = build_inference_row(db, t)
+                    if inference is None:
+                        continue
+                    latest_X, _ = inference
+                    expected_features = getattr(model, "n_features", None)
+                    actual_features = latest_X.shape[-1]
+                    if expected_features is not None and actual_features != expected_features:
+                        continue
+                    model_predictions[model_name] = model.predict(latest_X)
 
-        for t in tickers:
-            inference = build_inference_row(db, t)
-            if inference is None:
+                if len(model_predictions) < 2:
+                    continue
+                probs, pct = combiner.predict(model_predictions)
+                if calibrator.is_fitted:
+                    probs = calibrator.transform(probs)
+                direction = "UP" if probs[0] > 0.5 else "DOWN"
+                confidence = probs[0] if direction == "UP" else 1 - probs[0]
+                predictions.append(Prediction(
+                    ticker=t,
+                    direction=direction,
+                    confidence=float(confidence),
+                    predicted_pct_move=float(pct[0]),
+                    model_name="ensemble",
+                ))
+        except Exception as e:
+            click.echo(f"  Ensemble unavailable ({e}); falling back to base models.")
+            predictions = []
+
+    if not predictions:
+        base_models = parse_model_names(config.models.active_models)
+        for model_name in base_models:
+            model = create_model(model_name)
+            if model_name in SEQUENCE_MODELS:
                 continue
-            latest_X, _ = inference
-            if expected_features is not None and latest_X.shape[1] != expected_features:
+            active = registry.get_active(model.name)
+            if active is None:
+                click.echo(f"  No active {model.name} model. Run 'train' first.")
                 continue
-            probs, pct = model.predict(latest_X)
-            direction = "UP" if probs[0] > 0.5 else "DOWN"
-            confidence = probs[0] if direction == "UP" else 1 - probs[0]
-            predictions.append(Prediction(
-                ticker=t, direction=direction, confidence=float(confidence),
-                predicted_pct_move=float(pct[0]), model_name=model.name,
-            ))
+            model.load(active["model_path"])
 
+            expected_features = model.n_features
+
+            for t in tickers:
+                inference = build_inference_row(db, t)
+                if inference is None:
+                    continue
+                latest_X, _ = inference
+                if expected_features is not None and latest_X.shape[1] != expected_features:
+                    continue
+                probs, pct = model.predict(latest_X)
+                direction = "UP" if probs[0] > 0.5 else "DOWN"
+                confidence = probs[0] if direction == "UP" else 1 - probs[0]
+                predictions.append(Prediction(
+                    ticker=t, direction=direction, confidence=float(confidence),
+                    predicted_pct_move=float(pct[0]), model_name=model.name,
+                ))
+
+    _print_predictions(predictions, detail)
+
+
+def _print_predictions(predictions: list[object], detail: bool) -> None:
+    """Print grouped predictions."""
     for tier in ["STRONG BUY", "BUY", "SELL", "STRONG SELL"]:
         tier_preds = [p for p in predictions if p.signal_tier == tier]
         if tier_preds:
@@ -404,9 +459,67 @@ def pipeline(days: int, ticker: str | None, detail: bool) -> None:
 
 
 @main.command()
-def backtest() -> None:
+@click.option("--ticker", default=None, help="Backtest a single ticker")
+@click.option("--models", "model_names", default=None, help="Comma-separated base models")
+@click.option("--include-neural", is_flag=True, help="Also include LSTM and Transformer")
+@click.option("--seq-len", default=None, type=int, help="Sequence length for neural models")
+@click.option("--train-window", default=252, help="Training window in samples")
+@click.option("--val-window", default=63, help="Validation window in samples")
+@click.option("--step-size", default=21, help="Walk-forward step size")
+def backtest(
+    ticker: str | None,
+    model_names: str | None,
+    include_neural: bool,
+    seq_len: int | None,
+    train_window: int,
+    val_window: int,
+    step_size: int,
+) -> None:
     """Run walk-forward backtest."""
-    click.echo("Backtesting not yet wired -- models + evaluation complete, integration pending.")
+    from bist_predict.models.factory import parse_model_names
+    from bist_predict.research.ensemble_pipeline import (
+        EnsembleBacktestConfig,
+        run_walk_forward_backtest,
+    )
+
+    config = load_config()
+    db = Database(config.db_path)
+    db.initialize()
+    tickers = _resolve_tickers(db, ticker)
+    selected_models = parse_model_names(model_names or config.models.active_models)
+    backtest_config = EnsembleBacktestConfig(
+        model_names=selected_models,
+        include_neural=include_neural or config.models.include_neural,
+        seq_len=seq_len or config.models.seq_len,
+        validation_fraction=config.models.validation_fraction,
+        min_confidence=config.signals.min_confidence,
+        train_window=train_window,
+        val_window=val_window,
+        step_size=step_size,
+        commission=config.backtest.commission,
+        slippage=config.backtest.slippage,
+    )
+
+    try:
+        report = run_walk_forward_backtest(db, backtest_config, tickers=tickers)
+    except ValueError as e:
+        click.echo(f"No backtest run: {e}")
+        return
+
+    click.echo("Walk-forward backtest")
+    click.echo("=" * 40)
+    click.echo(f"  Folds: {report.folds}")
+    click.echo(f"  Trades: {report.trade_count}")
+    if not report.prediction_metrics:
+        click.echo("  Insufficient data for the configured windows.")
+        return
+    click.echo(f"  Accuracy: {report.prediction_metrics.get('accuracy', 0):.3f}")
+    click.echo(f"  F1: {report.prediction_metrics.get('f1', 0):.3f}")
+    click.echo(f"  Brier: {report.prediction_metrics.get('brier_score', 0):.5f}")
+    click.echo(f"  MAE: {report.prediction_metrics.get('mae', 0):.5f}")
+    click.echo(f"  Sharpe: {report.trading_metrics.get('sharpe_ratio', 0):.3f}")
+    click.echo(f"  Max DD: {report.trading_metrics.get('max_drawdown', 0):.2%}")
+    click.echo(f"  Total return: {report.trading_metrics.get('total_return', 0):.2%}")
 
 
 @main.command()

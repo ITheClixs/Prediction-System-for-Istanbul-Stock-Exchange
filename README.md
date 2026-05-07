@@ -891,9 +891,11 @@ Train or retrain prediction models.
 ```bash
 uv run bist-predict train                    # Train on all stocks
 uv run bist-predict train --ticker THYAO     # Train on one stock only
+uv run bist-predict train --models xgboost,lightgbm
+uv run bist-predict train --include-neural --seq-len 30
 ```
 
-Builds tabular datasets from the feature store, splits observations 80/20 in chronological order, trains active tabular models, saves model artifacts, and registers active versions in the model registry.
+Builds chronological keyed datasets from the feature store, trains active base models, fits a stacking ensemble on validation predictions, applies Platt calibration when validation labels contain both classes, saves model artifacts, and registers active versions in the model registry. The default remains the fast tabular ensemble (`xgboost,lightgbm`); LSTM and Transformer training is opt-in through `--include-neural`.
 
 ### `bist-predict signals`
 
@@ -905,7 +907,7 @@ uv run bist-predict signals --ticker THYAO   # Single stock
 uv run bist-predict signals --detail         # Detailed breakdown including HOLD
 ```
 
-Example output:
+When an active calibrated ensemble exists, `signals` loads the ensemble plus its active base models and emits one ensemble signal per ticker. If no ensemble is active, it falls back to the active tabular base models. Example output:
 
 ```text
 ========================================
@@ -936,9 +938,11 @@ Run walk-forward backtest.
 
 ```bash
 uv run bist-predict backtest
+uv run bist-predict backtest --ticker THYAO
+uv run bist-predict backtest --train-window 252 --val-window 63 --step-size 21
 ```
 
-The fold generator, cost model, and metrics are implemented and tested. The CLI command currently reports that full model/backtest integration is pending.
+Runs a leakage-aware walk-forward research simulation. Each fold trains base models on the earliest fold segment, trains the stacker and calibrator on a later in-fold meta segment, evaluates on the forward validation segment, applies commission and slippage to long/short paper positions, and prints prediction and trading metrics. This is a research backtest, not an execution engine or financial advice.
 
 ### `bist-predict accuracy`
 
@@ -986,6 +990,10 @@ lookback_days = 30          # Feature computation lookback
 [models]
 retrain_interval = "monthly" # Retrain cadence
 ensemble_weights = "learned" # "learned" or "equal"
+active_models = "xgboost,lightgbm"
+include_neural = false
+seq_len = 30
+validation_fraction = 0.2
 
 [quant]
 hmm_states = 3              # HMM regime states: bull, bear, sideways
@@ -1152,10 +1160,10 @@ All data sources are free and require no paid subscription:
 
 This repository is an applied research system, not a production trading desk. Important implementation facts:
 
-- The model library contains four tested model classes, but the CLI training path currently activates XGBoost and LightGBM.
-- The ensemble combiner and Platt calibrator are implemented and tested; integrating them into the default CLI inference path is a natural next research milestone.
+- The default CLI training path activates a calibrated XGBoost/LightGBM stacking ensemble; LSTM and Transformer models remain opt-in because they are slower to train and verify locally.
+- The ensemble combiner and Platt calibrator are integrated into the default inference path when an active ensemble is registered.
 - The Rust module exposes candlestick pattern detection, correlations, and beta; the current feature engine directly uses the indicator subset and price-derived features.
-- Walk-forward fold generation and transaction-cost logic are implemented and tested; full CLI-level backtest orchestration is marked as pending.
+- CLI-level walk-forward orchestration is available for research simulation with realistic commission and slippage assumptions.
 - The system depends on free public data sources, so availability, schema stability, and latency can vary.
 
 ---

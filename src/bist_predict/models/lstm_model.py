@@ -11,6 +11,8 @@ import torch.nn as nn
 from numpy.typing import NDArray
 from torch.utils.data import DataLoader, TensorDataset
 
+torch.set_num_threads(1)
+
 
 class _LSTMNet(nn.Module):
     """LSTM network with dual output heads."""
