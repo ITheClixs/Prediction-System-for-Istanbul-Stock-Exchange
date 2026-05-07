@@ -56,3 +56,29 @@ class TestPlattCalibrator:
         calibrated = cal.transform(np.array([0.5]))
         assert len(calibrated) == 1
         assert cal.min_confidence == 0.70
+
+    def test_save_and_load(self, tmp_path) -> None:
+        cal = PlattCalibrator(min_confidence=0.70)
+        raw_scores = np.linspace(0.0, 1.0, 100)
+        true_labels = (raw_scores > 0.5).astype(int)
+        cal.fit(raw_scores, true_labels)
+        expected = cal.transform(np.array([0.25, 0.75]))
+
+        cal.save(str(tmp_path))
+        loaded = PlattCalibrator()
+        loaded.load(str(tmp_path))
+        actual = loaded.transform(np.array([0.25, 0.75]))
+
+        assert loaded.is_fitted
+        assert loaded.status == "fitted"
+        assert loaded.min_confidence == 0.70
+        np.testing.assert_allclose(actual, expected)
+
+    def test_single_class_fit_is_skipped(self) -> None:
+        cal = PlattCalibrator()
+        cal.fit(np.array([0.2, 0.3, 0.4]), np.array([1, 1, 1]))
+
+        assert not cal.is_fitted
+        assert cal.status == "skipped_single_class"
+        with pytest.raises(RuntimeError):
+            cal.transform(np.array([0.5]))

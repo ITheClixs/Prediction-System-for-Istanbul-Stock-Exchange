@@ -44,6 +44,14 @@ class Prediction:
         return "HOLD"
 
 
+@dataclass(frozen=True, order=True)
+class DatasetKey:
+    """Stable identity for a supervised sample."""
+
+    date: str
+    ticker: str
+
+
 class PredictionModel(Protocol):
     """Protocol for all prediction models."""
 
@@ -71,8 +79,15 @@ class PredictionModel(Protocol):
     def load(self, path: str) -> None: ...
 
 
-# Type alias for dataset tuples
+# Type aliases for dataset tuples
 TrainDataset = tuple[NDArray[np.float64], NDArray[np.int64], NDArray[np.float64], list[str]]
+KeyedTrainDataset = tuple[
+    NDArray[np.float64],
+    NDArray[np.int64],
+    NDArray[np.float64],
+    list[DatasetKey],
+    list[str],
+]
 
 
 def _coerce_feature_value(value: object) -> float:
@@ -140,6 +155,18 @@ def build_tabular_dataset(
 
     Labels: next-day direction (1=UP, 0=DOWN) and next-day percentage move.
     """
+    X, y_dir, y_pct, keys, _ = build_tabular_dataset_with_keys(
+        db, ticker, min_features=min_features,
+    )
+    return X, y_dir, y_pct, [key.date for key in keys]
+
+
+def build_tabular_dataset_with_keys(
+    db: Database,
+    ticker: str,
+    min_features: int = 3,
+) -> KeyedTrainDataset:
+    """Build feature matrix, labels, and sample keys from stored data."""
     store = FeatureStore(db)
 
     with db.connect() as conn:
@@ -150,7 +177,7 @@ def build_tabular_dataset(
         ).fetchall()
 
     if not date_rows:
-        return np.empty((0, 0)), np.empty(0, dtype=np.int64), np.empty(0), []
+        return np.empty((0, 0)), np.empty(0, dtype=np.int64), np.empty(0), [], []
 
     all_dates = [r[0] for r in date_rows]
 
@@ -166,7 +193,7 @@ def build_tabular_dataset(
     feature_rows = []
     labels_dir = []
     labels_pct = []
-    valid_dates = []
+    keys: list[DatasetKey] = []
     feature_names = None
 
     for i, d in enumerate(all_dates[:-1]):
@@ -181,7 +208,7 @@ def build_tabular_dataset(
         if feature_names is None:
             feature_names = sorted(features.keys())
 
-        row = [features.get(f, 0.0) for f in feature_names]
+        row = [_coerce_feature_value(features.get(f)) for f in feature_names]
         feature_rows.append(row)
 
         current_price = price_map[d]
@@ -191,17 +218,17 @@ def build_tabular_dataset(
 
         labels_dir.append(direction)
         labels_pct.append(pct_move)
-        valid_dates.append(d)
+        keys.append(DatasetKey(date=d, ticker=ticker))
 
     if not feature_rows:
-        return np.empty((0, 0)), np.empty(0, dtype=np.int64), np.empty(0), []
+        return np.empty((0, 0)), np.empty(0, dtype=np.int64), np.empty(0), [], []
 
     X = np.array(feature_rows, dtype=np.float64)
     X = np.nan_to_num(X, nan=0.0)
     y_dir = np.array(labels_dir, dtype=np.int64)
     y_pct = np.array(labels_pct, dtype=np.float64)
 
-    return X, y_dir, y_pct, valid_dates
+    return X, y_dir, y_pct, keys, feature_names or []
 
 
 def build_sequence_dataset(
@@ -211,7 +238,21 @@ def build_sequence_dataset(
     min_features: int = 3,
 ) -> tuple[NDArray[np.float64], NDArray[np.int64], NDArray[np.float64], list[str]]:
     """Build sequential dataset for LSTM/Transformer models."""
-    X_flat, y_dir_flat, y_pct_flat, dates_flat = build_tabular_dataset(
+    X_seq, y_dir, y_pct, keys, _ = build_sequence_dataset_with_keys(
+        db, ticker, min_features=min_features,
+        seq_len=seq_len,
+    )
+    return X_seq, y_dir, y_pct, [key.date for key in keys]
+
+
+def build_sequence_dataset_with_keys(
+    db: Database,
+    ticker: str,
+    seq_len: int = 30,
+    min_features: int = 3,
+) -> KeyedTrainDataset:
+    """Build sequential dataset with stable sample keys."""
+    X_flat, y_dir_flat, y_pct_flat, keys_flat, feature_names = build_tabular_dataset_with_keys(
         db, ticker, min_features=min_features,
     )
 
@@ -221,24 +262,51 @@ def build_sequence_dataset(
             np.empty(0, dtype=np.int64),
             np.empty(0),
             [],
+            feature_names,
         )
 
     sequences = []
     labels_dir = []
     labels_pct = []
-    valid_dates = []
+    keys: list[DatasetKey] = []
 
     for i in range(seq_len, len(X_flat)):
         sequences.append(X_flat[i - seq_len : i])
         labels_dir.append(y_dir_flat[i])
         labels_pct.append(y_pct_flat[i])
-        valid_dates.append(dates_flat[i])
+        keys.append(keys_flat[i])
 
     X_seq = np.array(sequences, dtype=np.float64)
     y_dir = np.array(labels_dir, dtype=np.int64)
     y_pct = np.array(labels_pct, dtype=np.float64)
 
-    return X_seq, y_dir, y_pct, valid_dates
+    return X_seq, y_dir, y_pct, keys, feature_names
+
+
+def build_sequence_inference_row(
+    db: Database,
+    ticker: str,
+    seq_len: int = 30,
+    min_features: int = 3,
+) -> tuple[NDArray[np.float64], str] | None:
+    """Build a single latest sequence row from stored feature snapshots."""
+    feature_names, all_dates, latest_features = _get_training_feature_names(
+        db, ticker, min_features=min_features,
+    )
+    if not all_dates or len(latest_features) < min_features or len(all_dates) < seq_len:
+        return None
+
+    store = FeatureStore(db)
+    rows = []
+    for feature_date in all_dates[-seq_len:]:
+        features = store.load(ticker, feature_date)
+        if len(features) < min_features:
+            return None
+        rows.append([_coerce_feature_value(features.get(name)) for name in feature_names])
+
+    X = np.array([rows], dtype=np.float64)
+    X = np.nan_to_num(X, nan=0.0)
+    return X, all_dates[-1]
 
 
 def build_inference_row(

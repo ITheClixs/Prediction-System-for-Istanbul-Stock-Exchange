@@ -66,3 +66,21 @@ class TestEnsembleCombiner:
         probs, pct = combiner.predict(preds)
         np.testing.assert_array_almost_equal(probs, [0.7, 0.3])
         np.testing.assert_array_almost_equal(pct, [0.015, -0.015])
+
+    def test_save_and_load_trained_combiner(self, model_predictions: dict, tmp_path) -> None:
+        rng = np.random.default_rng(42)
+        y_dir = rng.integers(0, 2, 100).astype(np.int64)
+        y_pct = rng.normal(0, 0.01, 100)
+
+        combiner = EnsembleCombiner()
+        combiner.train(model_predictions, y_dir, y_pct)
+        expected_probs, expected_pct = combiner.predict(model_predictions)
+
+        combiner.save(str(tmp_path))
+        loaded = EnsembleCombiner()
+        loaded.load(str(tmp_path))
+        actual_probs, actual_pct = loaded.predict(model_predictions)
+
+        assert loaded.is_trained
+        np.testing.assert_allclose(actual_probs, expected_probs)
+        np.testing.assert_allclose(actual_pct, expected_pct)

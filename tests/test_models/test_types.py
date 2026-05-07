@@ -8,10 +8,14 @@ import numpy as np
 import pytest
 
 from bist_predict.models.types import (
+    DatasetKey,
     Prediction,
     TrainDataset,
     build_inference_row,
+    build_sequence_dataset_with_keys,
+    build_sequence_inference_row,
     build_tabular_dataset,
+    build_tabular_dataset_with_keys,
     build_sequence_dataset,
 )
 from bist_predict.features.store import FeatureStore
@@ -106,6 +110,15 @@ class TestBuildTabularDataset:
         )
         assert set(np.unique(y_dir)).issubset({0, 1})
 
+    def test_builds_keyed_feature_matrix(self, seeded_db: Database) -> None:
+        X, y_dir, y_pct, keys, feature_names = build_tabular_dataset_with_keys(
+            seeded_db, "THYAO", min_features=3,
+        )
+        assert X.shape[0] == len(keys)
+        assert X.shape[1] == len(feature_names)
+        assert keys[0] == DatasetKey(date="2026-01-01", ticker="THYAO")
+        assert all(key.ticker == "THYAO" for key in keys)
+
 
 class TestBuildSequenceDataset:
     def test_builds_sequences(self, seeded_db: Database) -> None:
@@ -115,6 +128,22 @@ class TestBuildSequenceDataset:
         assert X_seq.shape[0] > 0
         assert X_seq.shape[1] == 10
         assert X_seq.shape[2] >= 3
+
+    def test_builds_keyed_sequences(self, seeded_db: Database) -> None:
+        X_seq, y_dir, y_pct, keys, feature_names = build_sequence_dataset_with_keys(
+            seeded_db, "THYAO", seq_len=10, min_features=3,
+        )
+        assert X_seq.shape[0] == len(keys)
+        assert X_seq.shape[1] == 10
+        assert X_seq.shape[2] == len(feature_names)
+        assert keys[0] == DatasetKey(date="2026-01-11", ticker="THYAO")
+
+    def test_builds_sequence_inference_row(self, seeded_db: Database) -> None:
+        result = build_sequence_inference_row(seeded_db, "THYAO", seq_len=10)
+        assert result is not None
+        X, latest_date = result
+        assert latest_date == "2026-03-04"
+        assert X.shape == (1, 10, 4)
 
 
 class TestBuildInferenceRow:

@@ -88,6 +88,12 @@ class TransformerModel:
     def name(self) -> str:
         return "transformer"
 
+    @property
+    def n_features(self) -> int | None:
+        if self._net is not None:
+            return self._net.input_projection.in_features
+        return self._input_size
+
     def train(
         self,
         X_train: NDArray[np.float64],
@@ -98,6 +104,7 @@ class TransformerModel:
         y_pct_val: NDArray[np.float64] | None = None,
     ) -> dict[str, float]:
         input_size = X_train.shape[2] if X_train.ndim == 3 else X_train.shape[1]
+        self._input_size = input_size
         self._net = _TransformerNet(
             input_size, self._d_model, self._nhead, self._num_layers,
         ).to(self._device)

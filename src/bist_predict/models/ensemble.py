@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pickle
+from pathlib import Path
+
 import numpy as np
 from numpy.typing import NDArray
 from sklearn.linear_model import LogisticRegression, Ridge
@@ -23,6 +26,29 @@ class EnsembleCombiner:
     @property
     def is_trained(self) -> bool:
         return self._is_trained
+
+    def save(self, path: str) -> None:
+        """Persist trained ensemble meta-learners."""
+        p = Path(path)
+        p.mkdir(parents=True, exist_ok=True)
+        with open(p / "ensemble.pkl", "wb") as f:
+            pickle.dump(
+                {
+                    "dir_meta": self._dir_meta,
+                    "pct_meta": self._pct_meta,
+                    "is_trained": self._is_trained,
+                },
+                f,
+            )
+
+    def load(self, path: str) -> None:
+        """Load trained ensemble meta-learners."""
+        p = Path(path)
+        with open(p / "ensemble.pkl", "rb") as f:
+            payload = pickle.load(f)
+        self._dir_meta = payload["dir_meta"]
+        self._pct_meta = payload["pct_meta"]
+        self._is_trained = bool(payload["is_trained"])
 
     def train(
         self,
