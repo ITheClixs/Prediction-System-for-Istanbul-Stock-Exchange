@@ -1162,7 +1162,7 @@ This repository is an applied research system, not a production trading desk. Im
 
 ## 17. License
 
-GNU General Public License v3.0
+This project is protected under GNU General Public License v3.0
 
 ---
 
